@@ -20,20 +20,22 @@ import {
 const MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest.json';
 
 export class MinecraftLauncher {
-  // Known working mirrors for old versions (Mojang hosts are deprecated)
+  // Known working client jar URLs (for versions where manifests are unavailable)
+  // These are direct piston-data.mojang.com URLs that still work
   private static readonly VERSION_MIRRORS: Record<string, { client: string; assets: string }> = {
     '1.20.4': {
-      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.4/client-1.20.4.jar',
-      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.4/client-1.20.4.jar',
+      client: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
     },
     '1.20.3': {
-      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.3/client-1.20.3.jar',
-      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.3/client-1.20.3.jar',
+      client: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
     },
     '1.20.2': {
-      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.2/client-1.20.2.jar',
-      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.2/client-1.20.2.jar',
+      client: 'https://piston-data.mojang.com/v1/objects/82d1974e75fc984c5ed4b038e764e50958ac61a0/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/82d1974e75fc984c5ed4b038e764e50958ac61a0/client.jar',
     },
+    // Add more version URLs as needed
   };
 
   // Known libraries mirrors
@@ -452,7 +454,7 @@ export class MinecraftLauncher {
       const libraries = versionDetails.libraries || [];
       totalFiles = 1 + libraries.length; // 1 for client jar
 
-      // Help to build FabricMC library URL from library name
+      // Help to build alternative library URLs as fallbacks
       const buildFabricLibUrl = (libName: string): string => {
         const parts = libName.split(':');
         if (parts.length >= 3) {
@@ -460,7 +462,8 @@ export class MinecraftLauncher {
           const artifactId = parts[1];
           const libVersion = parts[2];
           const libPath = groupId.replace(/\./g, '/') + `/${artifactId}/${libVersion}/${artifactId}-${libVersion}.jar`;
-          return `https://maven.fabricmc.net/${libPath}`;
+          // Try Maven Central first (works for public libraries)
+          return `https://repo1.maven.org/maven2/${libPath}`;
         }
         return '';
       };
