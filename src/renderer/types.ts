@@ -42,6 +42,8 @@ export interface Library {
     windows?: string;
     osx?: string;
   };
+  // For Minecraft 1.17+ style libraries with classifiers
+  [key: string]: any; // Allow additional properties needed for native library detection
 }
 
 export interface Rule {
@@ -56,7 +58,16 @@ export interface Downloads {
     'natives-linux'?: DownloadInfo;
     'natives-windows'?: DownloadInfo;
     'natives-osx'?: DownloadInfo;
+    'natives-windows-x86'?: DownloadInfo;
+    'natives-windows-x86_64'?: DownloadInfo;
+    'natives-windows-arm64'?: DownloadInfo;
+    'natives-linux-x86_64'?: DownloadInfo;
+    'natives-linux-aarch_64'?: DownloadInfo;
+    'natives-macos'?: DownloadInfo;
+    'natives-macos-aarch_64'?: DownloadInfo;
+    'natives-macos-arm64'?: DownloadInfo;
   };
+  [key: string]: any; // Allow additional properties
 }
 
 export interface DownloadInfo {

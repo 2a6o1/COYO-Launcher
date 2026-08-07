@@ -15,6 +15,7 @@ import {
   LaunchResult,
   JavaInfo,
   ProgressUpdate,
+  Library,
 } from '../renderer/types';
 
 const MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest.json';
@@ -253,6 +254,28 @@ export class MinecraftLauncher {
   }
 
   /**
+   * Get the size of a file at a URL (via HEAD request)
+   */
+  private async getUrlSize(urlStr: string): Promise<number | null> {
+    return new Promise((resolve) => {
+      const client = urlStr.startsWith('https') ? https : http;
+      client.get(urlStr, (res) => {
+        // Handle redirects
+        if (res.statusCode === 302 || res.statusCode === 301) {
+          const redirectUrl = res.headers.location;
+          if (redirectUrl) {
+            this.getUrlSize(redirectUrl).then(resolve).catch(() => resolve(null));
+            return;
+          }
+        }
+        const size = parseInt(res.headers['content-length'] || '0', 10);
+        res.resume(); // Consume response data
+        resolve(size > 0 ? size : null);
+      }).on('error', () => resolve(null));
+    });
+  }
+
+  /**
    * Setup game directory structure
    */
   async setupGameDir(version: string): Promise<void> {
@@ -271,29 +294,64 @@ export class MinecraftLauncher {
 
     // Build classpath from libraries directory
     const librariesPath = path.join(this.gameDir, 'libraries');
-    let classpath = clientJar;
+    const classpathParts: string[] = [];
 
-    // Add all JARs from libraries (simplified - in production would parse version JSON)
+    // Helper to check if assets exist
+    const checkAssetsExist = async (): Promise<boolean> => {
+      const assetsIndexDir = path.join(this.gameDir, 'assets', 'indexes');
+      try {
+        const files = await fs.readdir(assetsIndexDir);
+        return files.length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    // Add all JARs from libraries
     try {
       if (fs.existsSync(librariesPath)) {
         const jars = this.findJarsInDir(librariesPath);
-        classpath = [...jars, clientJar].join(path.delimiter);
+        classpathParts.push(...jars);
       }
     } catch {
       // Use basic classpath if libraries not found
     }
 
+    // Add client jar at the end
+    classpathParts.push(clientJar);
+
+    const classpath = classpathParts.join(path.delimiter);
     const nativesPath = path.join(this.gameDir, 'natives');
     const assetsDir = path.join(this.gameDir, 'assets');
-    const assetIndex = config.version.startsWith('1.')
-      ? `${config.version.split('.')[0]}.${config.version.split('.')[1]}`
-      : config.version;
 
-    return [
+    // Calculate asset index correctly:
+    // For 1.20.x -> "20", for 1.19.x -> "19", for 1.21+ -> use major.minor
+    let assetIndex = '';
+    if (config.version.startsWith('1.')) {
+      const parts = config.version.split('.');
+      if (parts.length >= 2) {
+        const minor = parseInt(parts[1], 10);
+        // Versions 1.21+ use different asset indexing
+        if (minor >= 21) {
+          assetIndex = `${parts[0]}.${parts[1]}`;
+        } else {
+          assetIndex = String(minor);
+        }
+      }
+    } else {
+      assetIndex = config.version;
+    }
+
+    // For very old versions (1.12.2, etc.), assets don't exist
+    if (config.version <= '1.12.2' || !assetIndex) {
+      assetIndex = '';
+    }
+
+    const args: string[] = [
       '-cp',
       classpath,
       '-Xmx2G',
-      `-Djava.library.path="${nativesPath}"`,
+      `-Djava.library.path=${nativesPath}`,
       'net.minecraft.client.main.Main',
       '--username',
       config.nickname,
@@ -303,8 +361,14 @@ export class MinecraftLauncher {
       this.gameDir,
       '--assetsDir',
       assetsDir,
-      '--assetIndex',
-      assetIndex,
+    ];
+
+    // Only add asset index if it exists or if the version uses them
+    if (assetIndex) {
+      args.push('--assetIndex', assetIndex);
+    }
+
+    args.push(
       '--uuid',
       'offline',
       '--accessToken',
@@ -312,7 +376,9 @@ export class MinecraftLauncher {
       '--userType',
       'legacy',
       '--offline', // Native offline mode
-    ];
+    );
+
+    return args;
   }
 
   /**
@@ -373,29 +439,101 @@ export class MinecraftLauncher {
       const args = this.buildLaunchArgs(config);
       const javaPath = javaInfo.path;
 
+      // Log classpath for debugging
+      const cpMatch = args.find(a => a === '-cp');
+      const cpIndex = args.indexOf('-cp');
+      if (cpIndex >= 0 && cpIndex + 1 < args.length) {
+        console.log(`[Launch] Classpath has ${args[cpIndex + 1].split(path.delimiter).length} entries`);
+      }
+
+      console.log(`[Launch] Spawning: java ${args.join(' ')}`);
+      console.log(`[Launch] CWD: ${this.gameDir}`);
+
       this.currentProcess = spawn(javaPath, args, {
         cwd: this.gameDir,
         stdio: ['pipe', 'pipe', 'pipe'],
+        // For Windows, ensure proper window handling
+        windowsHide: false,
       });
 
-      // Forward output to progress callback
-      this.currentProcess.stdout?.on('data', (data) => {
-        onProgress?.({ type: 'status', message: data.toString().trim() });
-      });
+      // Track if we've seen valid startup output
+      let seenStartupOutput = false;
+      let immediateError = false;
+      let stderrOutput = '';
+
+      // Give the process 2 seconds to show any immediate errors
+      const startupTimeout = setTimeout(() => {
+        if (!seenStartupOutput && !immediateError) {
+          // Process is still running after 2 seconds - likely launched successfully
+          console.log(`[Launch] Process running (no immediate errors)`);
+        }
+      }, 2000);
 
       this.currentProcess.stderr?.on('data', (data) => {
-        onProgress?.({ type: 'status', message: data.toString().trim() });
+        const msg = data.toString().trim();
+        if (!msg) return;
+
+        stderrOutput += msg + '\n';
+        console.log(`[Launch] STDERR: ${msg}`);
+        onProgress?.({ type: 'status', message: msg });
+
+        // Check for critical errors
+        const isError = msg.includes('Error') || msg.includes('Exception') ||
+                        msg.includes('ClassNotFoundException') ||
+                        msg.includes('NoClassDefFoundError') ||
+                        msg.includes('UnsatisfiedLinkError') ||
+                        msg.includes('Failed to load');
+
+        if (isError) {
+          immediateError = true;
+          onProgress?.({ type: 'error', message: msg });
+        }
+      });
+
+      this.currentProcess.stdout?.on('data', (data) => {
+        const msg = data.toString().trim();
+        if (!msg) return;
+        console.log(`[Launch] STDOUT: ${msg}`);
+
+        // Look for Minecraft startup indicators
+        if (msg.includes('[main]')) {
+          seenStartupOutput = true;
+        }
+        // Filter out noisy progress output
+        if (!msg.includes('[Progress') && !msg.includes('Loading class')) {
+          onProgress?.({ type: 'status', message: msg });
+        }
       });
 
       this.currentProcess.on('error', (err: Error) => {
-        onProgress?.({ type: 'error', message: `Error: ${err.message}` });
+        clearTimeout(startupTimeout);
+        immediateError = true;
+        console.log(`[Launch] SPAWN ERROR: ${err.message}`);
+        onProgress?.({ type: 'error', message: `Error al lanzar Java: ${err.message}` });
       });
 
       this.currentProcess.on('close', (code) => {
-        onProgress?.({ type: 'complete', message: `Minecraft exited with code ${code}` });
+        clearTimeout(startupTimeout);
+        console.log(`[Launch] Process closed with code: ${code}`);
+
+        if (immediateError) {
+          onProgress?.({ type: 'error', message: `Minecraft falló: código ${code}` });
+        } else if (code !== 0) {
+          onProgress?.({ type: 'error', message: `Minecraft exit code: ${code}` });
+        } else if (!seenStartupOutput) {
+          // Process exited with 0 but we never saw startup output - might be a failure
+          if (stderrOutput && stderrOutput.includes('Error')) {
+            onProgress?.({ type: 'error', message: 'Error durante el lanzamiento' });
+          } else {
+            onProgress?.({ type: 'complete', message: `Minecraft iniciado` });
+          }
+        } else {
+          onProgress?.({ type: 'complete', message: `Minecraft iniciado correctamente` });
+        }
         this.currentProcess = null;
       });
 
+      // Return "success" but note that we're monitoring for errors
       return {
         success: true,
         message: `Minecraft lanzado con ${config.nickname}`,
@@ -557,63 +695,144 @@ export class MinecraftLauncher {
       // Download libraries
       console.log(`[Download] Downloading ${libraries.length} libraries...`);
 
-      for (const lib of libraries) {
-        if (!lib.name || !lib.downloads?.artifact?.url) {
-          console.log(`[Download] SKIP invalid lib entry`);
+      // Determine native classifier based on platform
+      // For Windows, try to get the best native library (windows-x86_64 preferred, then windows)
+      const platform = process.platform;
+      let nativeLibraryKey = '';
+      if (platform === 'win32') {
+        nativeLibraryKey = 'natives-windows-x86_64'; // Try 64-bit first
+      } else if (platform === 'darwin') {
+        if (process.env.ARCH === 'arm64') {
+          nativeLibraryKey = 'natives-macos-arm64';
+        } else {
+          nativeLibraryKey = 'natives-macos';
+        }
+      } else {
+        nativeLibraryKey = 'natives-linux';
+      }
+
+      console.log(`[Download] Platform: ${platform}, Native key: ${nativeLibraryKey}`);
+
+      // Track downloadable libraries (including natives as separate entries)
+      interface DownloadableLib {
+        name: string;
+        url: string;
+        isNative: boolean;
+        baseName: string;
+      }
+      const downloadableLibs: DownloadableLib[] = [];
+      libraries.forEach((lib: Library) => {
+        if (!lib.name || !lib.downloads?.artifact?.url) return;
+        const parts = lib.name.split(':');
+        if (parts.length < 3) return;
+
+        // Check if this is already a native library (has :natives- in name)
+        const isNativeLib = lib.name.includes(':natives-');
+
+        // Try to find URL for native version if this is a core library
+        let nativeUrl = '';
+        if (!isNativeLib && lib.downloads?.classifiers) {
+          // Check classifiers for native
+          const classifierKeys = ['natives-windows', 'natives-windows-x86', 'natives-windows-arm64', 'natives-linux', 'natives-osx', 'natives-macos', 'natives-macos-arm64'] as const;
+          for (const key of classifierKeys) {
+            if (lib.downloads.classifiers?.[key]?.url) {
+              // Construct the native library entry name
+              const nativeLibName = `${parts[0]}:${parts[1]}:${parts[2]}:${key}`;
+              nativeUrl = lib.downloads.classifiers[key].url;
+              downloadableLibs.push({ name: nativeLibName, url: nativeUrl, isNative: true, baseName: lib.name });
+              break;
+            }
+          }
+        }
+
+        // Add the main artifact
+        downloadableLibs.push({ name: lib.name, url: lib.downloads.artifact.url, isNative: false, baseName: lib.name });
+      });
+
+      console.log(`[Download] Total downloadable items (including natives): ${downloadableLibs.length}`);
+
+      // Download all libraries and natives
+      totalFiles = 1 + downloadableLibs.length; // 1 for client jar
+
+      for (const libEntry of downloadableLibs) {
+        if (!libEntry.url) {
+          console.log(`[Download] SKIP invalid entry - no URL`);
           continue;
         }
 
-        // Parse library name (format: groupId:artifactId:version)
-        const parts = lib.name.split(':');
-        if (parts.length < 3) continue;
-
-        const groupId = parts[0];
-        const artifactId = parts[1];
-        const libVersion = parts[2];
-
-        // Try Mojang URL first, build FabricMC fallback
-        let downloadUrl = lib.downloads.artifact.url;
         try {
-          new URL(downloadUrl);
+          new URL(libEntry.url);
         } catch {
           console.log(`[Download] SKIP invalid URL`);
           continue;
         }
 
-        // Create library directory structure
-        const libDirParts = groupId.split('.');
-        const libDir = path.join(librariesDir, ...libDirParts, artifactId, libVersion);
-        await fs.ensureDir(libDir);
+        // Parse library name (format: groupId:artifactId:version[:classifier])
+        const libName = libEntry.name;
+        const parts = libName.split(':');
 
-        const libJarName = `${artifactId}-${libVersion}.jar`;
+        // Determine path for this library
+        let libDir: string;
+        let libJarName: string;
+
+        if (libEntry.isNative && libEntry.baseName) {
+          // Native library jar
+          const baseParts = libEntry.baseName.split(':');
+          if (parts.length >= 4 && parts[3]?.startsWith('natives-')) {
+            const groupId = baseParts[0];
+            const artifactId = baseParts[1];
+            const libVersion = baseParts[2];
+            const classifier = parts[3];
+
+            const libDirParts = groupId.split('.');
+            libDir = path.join(librariesDir, ...libDirParts, artifactId, libVersion);
+            libJarName = `${artifactId}-${libVersion}-${classifier}.jar`;
+          } else {
+            continue;
+          }
+        } else {
+          // Regular library
+          const groupId = parts[0];
+          const artifactId = parts[1];
+          const libVersion = parts[2];
+
+          const libDirParts = groupId.split('.');
+          libDir = path.join(librariesDir, ...libDirParts, artifactId, libVersion);
+          libJarName = `${artifactId}-${libVersion}.jar`;
+        }
+
+        await fs.ensureDir(libDir);
         const libJarPath = path.join(libDir, libJarName);
 
         // Check if library already exists with same size
         let needsDownload = true;
         try {
           const existingStats = await fs.stat(libJarPath);
-          if (existingStats.size === lib.downloads?.artifact?.size) {
+          const expectedSize = libEntry.isNative
+            ? (await this.getUrlSize(libEntry.url))
+            : null;
+          if (expectedSize && existingStats.size === expectedSize) {
             needsDownload = false;
-            console.log(`[Download] SKIP ${libJarName} (exists)`);
+            console.log(`[Download] SKIP ${libJarName} (exists, correct size)`);
+          } else if (!expectedSize) {
+            needsDownload = true;
           }
         } catch {
           needsDownload = true;
         }
 
         if (needsDownload) {
+          const libUrl = libEntry.url;
           console.log(`[Download] DL ${libJarName}...`);
-          let libUrl = downloadUrl;
 
-          // Check if we're using a Mojang library host and build FabricMC fallback
+          // Check for FabricMC fallback
           let fabricFallback = '';
           try {
-            const parsed = new URL(downloadUrl);
+            const parsed = new URL(libUrl);
             if (parsed.hostname.includes('libraries.minecraft.net')) {
-              fabricFallback = buildFabricLibUrl(lib.name);
+              fabricFallback = buildFabricLibUrl(libName);
             }
-          } catch {
-            // Invalid URL, skip
-          }
+          } catch {}
 
           try {
             await this.downloadFile(
@@ -669,47 +888,49 @@ export class MinecraftLauncher {
       }
 
       // Download assets index if available
-      if (versionDetails.assets) {
-        // assets is a string like "26" or an object {id, url}
-        // Need to fetch actual assets index from Mojang
+      // The assetIndex field contains the correct URL for the assets index
+      let assetIndexUrl: string | null = null;
+
+      if (versionDetails.assetIndex?.url) {
+        // Version manifest provides the direct URL to assets index
+        assetIndexUrl = versionDetails.assetIndex.url;
+      } else if (versionDetails.assets) {
+        // Legacy format - assets is either a string ID or object with URL
         const assetsVersion = versionDetails.assets;
-        let assetIndexUrl: string | null = null;
-
-        if (typeof assetsVersion === 'string') {
-          // Build assets URL from the assets version
-          // Assets are stored at: https://resources.download.minecraft.net/{hash}
-          // We need to fetch the assets index JSON
-          assetIndexUrl = `https://piston-meta.mojang.com/mc/game/assets/${assetsVersion}/indexes`;
-          console.log(`[Download] Fetching assets index for version ${assetsVersion}...`);
-        } else if (assetsVersion && typeof assetsVersion === 'object') {
-          const assetsObj = assetsVersion as { id?: string; url?: string };
-          if (assetsObj.url) {
-            assetIndexUrl = assetsObj.url;
-          } else if (assetsObj.id) {
-            assetIndexUrl = `https://piston-meta.mojang.com/mc/game/assets/${assetsObj.id}/indexes`;
-          }
+        if (typeof assetsVersion === 'object' && (assetsVersion as any).url) {
+          assetIndexUrl = (assetsVersion as any).url;
         }
+        // Note: For string assets IDs, we need to construct URL properly
+        // Most modern versions have assetIndex.url, but if not, skip
+      }
 
-        if (assetIndexUrl) {
-          onProgress?.({ type: 'status', message: 'Descargando assets...' });
-          console.log(`[Download] Downloading assets index: ${assetIndexUrl}`);
+      if (assetIndexUrl) {
+        onProgress?.({ type: 'status', message: 'Descargando assets...' });
+        console.log(`[Download] Downloading assets index: ${assetIndexUrl}`);
 
-          const assetIndexPath = path.join(assetsDir, 'assets.json');
-          try {
-            await this.downloadFile(
-              assetIndexUrl,
-              assetIndexPath,
-              (p) => {
-                console.log(`[Download] Assets index: ${p.percent}%`);
-                onProgress?.({ ...p, message: 'Descargando assets index...' });
-              }
-            );
-            downloadedFiles.push('assets-index');
-            console.log(`[Download] ✓ Assets index descargado`);
-          } catch (assetsErr) {
-            console.log(`[Download] Assets download failed (non-critical): ${(assetsErr as Error).message}`);
-            // Assets are optional, don't fail the whole download
-          }
+        // Extract the asset index ID from the URL and use it as filename
+        // URL format: https://piston-meta.mojang.com/v1/packages/{sha1}/{id}.json
+        // We need to save it as {id}.json in assets/indexes/
+        const urlParts = assetIndexUrl.split('/');
+        const assetIndexFile = urlParts[urlParts.length - 1] || `${versionDetails.assetIndex?.id || 'assets'}.json`;
+
+        // Alternative: use the id from assetIndex object if available
+        const assetIndexId = versionDetails.assetIndex?.id;
+        const indexPath = assetIndexId ? path.join(assetsDir, `${assetIndexId}.json`) : path.join(assetsDir, assetIndexFile);
+
+        try {
+          await this.downloadFile(
+            assetIndexUrl,
+            indexPath,
+            (p) => {
+              console.log(`[Download] Assets index: ${p.percent}%`);
+              onProgress?.({ ...p, message: 'Descargando assets index...' });
+            }
+          );
+          downloadedFiles.push('assets-index');
+          console.log(`[Download] ✓ Assets index descargado como ${path.basename(indexPath)}`);
+        } catch (assetsErr) {
+          console.log(`[Download] Assets download failed (non-critical): ${(assetsErr as Error).message}`);
         }
       }
 
