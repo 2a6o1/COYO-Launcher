@@ -563,12 +563,6 @@ export class MinecraftLauncher {
           console.log(`[Download] SKIP invalid URL`);
           continue;
         }
-        try {
-          new URL(downloadUrl);
-        } catch {
-          console.log(`[Download] SKIP invalid URL`);
-          continue;
-        }
 
         // Create library directory structure
         const libDirParts = groupId.split('.');
