@@ -18,7 +18,7 @@ import {
 } from '../renderer/types';
 
 const MANIFEST_URL = 'https://launchermeta.mojang.com/mc/game/version_manifest.json';
-const AUTHLIB_INJECTOR_PATH = path.join(app.getPath('resources'), 'authlib-injector.jar');
+const AUTHLIB_INJECTOR_PATH = path.join(__dirname, '..', '..', 'resources', 'authlib-injector.jar');
 
 export class MinecraftLauncher {
   private gameDir: string;
@@ -162,7 +162,7 @@ export class MinecraftLauncher {
           resolve();
         });
 
-        writer.on('error', (err) => {
+        writer.on('error', (err: Error) => {
           reject(err);
         });
       }).on('error', reject);

@@ -7,16 +7,21 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import { initIPC } from './ipc-handlers';
 
+// Type extensions for process in Electron context
+declare namespace NodeJS {
+  interface ProcessEnv {
+    JAVA_HOME?: string;
+    NODE_ENV?: string;
+  }
+  interface Process {
+    platform: string;
+  }
+}
+
 // Base paths
-const IS_DEV = !app.isPackaged();
+const IS_DEV = !app.isPackaged || process.env.NODE_ENV === 'development';
 
 let mainWindow: BrowserWindow | null = null;
-
-function getAppPath() {
-  return IS_DEV
-    ? path.join(__dirname, '..')
-    : path.getAppPath();
-}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -25,10 +30,9 @@ function createWindow(): void {
     minWidth: 400,
     minHeight: 350,
     webPreferences: {
-      preload: path.join(__dirname, '../../dist/preload.js'),
+      preload: path.join(__dirname, '..', 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      enableRemoteModule: false,
     },
     title: 'FallenAngel Launcher',
   });

@@ -3,20 +3,6 @@
  * Handles user interactions and communicates with main process via IPC
  */
 
-// Type definitions for preload API
-declare global {
-  interface Window {
-    mcpAPI: {
-      getVersions: () => Promise<{ success: boolean; versions?: Array<{ id: string; type: string; url: string; time: string; releaseTime: string }>; error?: string }>;
-      checkJava: () => Promise<{ success: boolean; java?: { path: string; version: string }; error?: string }>;
-      launch: (config: { version: string; nickname: string; javaPath?: string; gameDir?: string }) =>
-        Promise<{ success: boolean; message: string; errorCode?: string; javaPath?: string; gameDir?: string }>;
-      checkVersionInstalled: (version: string) => Promise<{ installed: boolean }>;
-      onProgress: (callback: (progress: { type: string; message: string; percent?: number }) => void) => () => void;
-    };
-  }
-}
-
 // DOM elements
 const nicknameInput = document.getElementById('nickname') as HTMLInputElement;
 const versionSelect = document.getElementById('version') as HTMLSelectElement;
@@ -26,9 +12,16 @@ const statusDiv = document.getElementById('status') as HTMLDivElement;
 const logsDiv = document.getElementById('logs') as HTMLDivElement;
 
 // App state
-let versions: Array<{ id: string; type: string; url: string; time: string; releaseTime: string }> = [];
+let versions: { id: string; type: string; url: string; time: string; releaseTime: string }[] = [];
 let selectedVersion: string = '';
 let javaPath: string | null = null;
+
+// Type assertion for window.mcpAPI (defined in preload.ts)
+declare const mcpAPI: {
+  getVersions: () => Promise<{ success: boolean; versions?: typeof versions; error?: string }>;
+  checkJava: () => Promise<{ success: boolean; java?: { path: string; version: string }; error?: string }>;
+  launch: (config: { version: string; nickname: string; javaPath?: string }) => Promise<{ success: boolean; message: string; errorCode?: string }>;
+};
 
 /**
  * Log a message to the logs container
@@ -54,17 +47,17 @@ function setStatus(message: string, type: 'ready' | 'working' | 'error' | 'warni
 /**
  * Set button loading state
  */
-function setLoading(button: HTMLButtonElement, loading: boolean, text: string = 'Cargando...'): void {
+function setLoading(button: HTMLButtonElement, loading: boolean): void {
   const btnText = button.querySelector('.btn-text') as HTMLSpanElement;
   const btnLoader = button.querySelector('.btn-loader') as HTMLSpanElement;
 
   if (loading) {
-    btnText.style.display = 'none';
-    btnLoader.style.display = 'inline';
+    if (btnText) btnText.style.display = 'none';
+    if (btnLoader) btnLoader.style.display = 'inline';
     button.disabled = true;
   } else {
-    btnText.style.display = 'inline';
-    btnLoader.style.display = 'none';
+    if (btnText) btnText.style.display = 'inline';
+    if (btnLoader) btnLoader.style.display = 'none';
     button.disabled = false;
   }
 }
@@ -75,7 +68,6 @@ function setLoading(button: HTMLButtonElement, loading: boolean, text: string = 
 function isValid(): boolean {
   const nickname = nicknameInput.value.trim();
   const version = versionSelect.value;
-
   return nickname.length > 0 && version.length > 0;
 }
 
@@ -92,7 +84,7 @@ function updateButtonState(): void {
 async function loadVersions(): Promise<void> {
   try {
     setStatus('Cargando versiones...');
-    const result = await window.mcpAPI.getVersions();
+    const result = await mcpAPI.getVersions();
 
     if (result.success && result.versions) {
       versions = result.versions;
@@ -138,7 +130,7 @@ async function loadVersions(): Promise<void> {
  */
 async function checkJava(): Promise<void> {
   try {
-    const result = await window.mcpAPI.checkJava();
+    const result = await mcpAPI.checkJava();
 
     if (result.success && result.java) {
       javaPath = result.java.path;
@@ -176,7 +168,7 @@ async function launchGame(): Promise<void> {
   log(`Iniciando Minecraft ${version} como ${nickname}`);
 
   try {
-    const result = await window.mcpAPI.launch({
+    const result = await mcpAPI.launch({
       version,
       nickname,
       javaPath: javaPath || undefined,
@@ -198,7 +190,7 @@ async function launchGame(): Promise<void> {
     log(`Error crítico: ${err.message}`, 'error');
     setStatus('Error crítico', 'error');
   } finally {
-    setLoading(launchBtn, false, 'Jugar');
+    setLoading(launchBtn, false);
   }
 }
 
@@ -227,5 +219,3 @@ document.addEventListener('DOMContentLoaded', async () => {
   await checkJava();
   log('Launcher listo para usar');
 });
-
-export {};

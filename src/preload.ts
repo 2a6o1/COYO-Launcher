@@ -48,17 +48,22 @@ const mcpAPI = {
    * Listen for progress updates during download/launch
    */
   onProgress: (callback: (progress: { type: string; message: string; percent?: number }) => void): (() => void) => {
-    ipcRenderer.on('mcp:progress', (_event, progress) => callback(progress));
-    return () => ipcRenderer.removeListener('mcp:progress', callback);
+    const listener = (_event: Electron.IpcRendererEvent, progress: { type: string; message: string; percent?: number }) => {
+      callback(progress);
+    };
+    ipcRenderer.on('mcp:progress', listener);
+    return () => ipcRenderer.removeListener('mcp:progress', listener);
   },
 };
 
 // Expose the API to the renderer process
 contextBridge.exposeInMainWorld('mcpAPI', mcpAPI);
 
-// Type augmentation for TypeScript
+// Declare the window interface for TypeScript
 declare global {
   interface Window {
     mcpAPI: typeof mcpAPI;
   }
 }
+
+export {};
