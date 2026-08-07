@@ -670,34 +670,46 @@ export class MinecraftLauncher {
 
       // Download assets index if available
       if (versionDetails.assets) {
-        // assets can be a string URL or an object {id, url}
+        // assets is a string like "26" or an object {id, url}
+        // Need to fetch actual assets index from Mojang
+        const assetsVersion = versionDetails.assets;
         let assetIndexUrl: string | null = null;
 
-        if (typeof versionDetails.assets === 'string') {
-          assetIndexUrl = versionDetails.assets;
-        } else if (versionDetails.assets && typeof versionDetails.assets === 'object') {
-          // Try to get URL from assets object
-          const assetsObj = versionDetails.assets as { id?: string; url?: string };
+        if (typeof assetsVersion === 'string') {
+          // Build assets URL from the assets version
+          // Assets are stored at: https://resources.download.minecraft.net/{hash}
+          // We need to fetch the assets index JSON
+          assetIndexUrl = `https://piston-meta.mojang.com/mc/game/assets/${assetsVersion}/indexes`;
+          console.log(`[Download] Fetching assets index for version ${assetsVersion}...`);
+        } else if (assetsVersion && typeof assetsVersion === 'object') {
+          const assetsObj = assetsVersion as { id?: string; url?: string };
           if (assetsObj.url) {
             assetIndexUrl = assetsObj.url;
+          } else if (assetsObj.id) {
+            assetIndexUrl = `https://piston-meta.mojang.com/mc/game/assets/${assetsObj.id}/indexes`;
           }
         }
 
         if (assetIndexUrl) {
           onProgress?.({ type: 'status', message: 'Descargando assets...' });
-          console.log(`[Download] Downloading assets index...`);
+          console.log(`[Download] Downloading assets index: ${assetIndexUrl}`);
 
           const assetIndexPath = path.join(assetsDir, 'assets.json');
-          await this.downloadFile(
-            assetIndexUrl,
-            assetIndexPath,
-            (p) => {
-              console.log(`[Download] Assets index: ${p.percent}%`);
-              onProgress?.({ ...p, message: 'Descargando assets index...' });
-            }
-          );
-          downloadedFiles.push('assets-index');
-          console.log(`[Download] ✓ Assets index descargado`);
+          try {
+            await this.downloadFile(
+              assetIndexUrl,
+              assetIndexPath,
+              (p) => {
+                console.log(`[Download] Assets index: ${p.percent}%`);
+                onProgress?.({ ...p, message: 'Descargando assets index...' });
+              }
+            );
+            downloadedFiles.push('assets-index');
+            console.log(`[Download] ✓ Assets index descargado`);
+          } catch (assetsErr) {
+            console.log(`[Download] Assets download failed (non-critical): ${(assetsErr as Error).message}`);
+            // Assets are optional, don't fail the whole download
+          }
         }
       }
 
