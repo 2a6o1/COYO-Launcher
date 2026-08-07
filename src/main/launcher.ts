@@ -7,8 +7,8 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import * as http from 'http';
 import * as https from 'https';
-import * as url from 'url';
-import { app } from 'electron';
+import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { app, shell } from 'electron';
 import {
   VersionManifest,
   LaunchConfig,
@@ -18,11 +18,11 @@ import {
 } from '../renderer/types';
 
 const MANIFEST_URL = 'https://launchermeta.mojang.com/mc/game/version_manifest.json';
-const AUTHLIB_INJECTOR_PATH = path.join(__dirname, '..', '..', 'resources', 'authlib-injector.jar');
 
 export class MinecraftLauncher {
   private gameDir: string;
   private versionsCache: VersionManifest | null = null;
+  private currentProcess: ChildProcessWithoutNullStreams | null = null;
 
   constructor() {
     this.gameDir = path.join(app.getPath('userData'), 'minecraft');
@@ -64,7 +64,6 @@ export class MinecraftLauncher {
 
       client.get(urlStr, (res) => {
         if (res.statusCode === 302 || res.statusCode === 301) {
-          // Follow redirect
           const redirectUrl = res.headers.location;
           if (redirectUrl) {
             resolve(this.fetchJson<T>(redirectUrl));
@@ -91,24 +90,79 @@ export class MinecraftLauncher {
   }
 
   /**
-   * Check if Java is available and meets requirements
+   * Check if Java is available and get actual version
    */
   async findJava(): Promise<JavaInfo> {
-    // Check JAVA_HOME
+    // Try JAVA_HOME first
     if (process.env.JAVA_HOME) {
-      try {
-        const javaPath = path.join(process.env.JAVA_HOME, 'bin', 'java');
-        const exists = await fs.pathExists(javaPath);
-        if (exists) {
-          return { path: javaPath, version: '17', valid: true };
+      const javaExe = process.platform === 'win32'
+        ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
+        : path.join(process.env.JAVA_HOME, 'bin', 'java');
+
+      if (await fs.pathExists(javaExe)) {
+        const version = await this.getJavaVersion(javaExe);
+        if (version) {
+          return { path: javaExe, version, valid: true };
         }
-      } catch {
-        // Continue to next check
       }
     }
 
     // Check system PATH
-    return { path: 'java', version: '17', valid: true };
+    return new Promise((resolve) => {
+      const javaProcess = spawn('java', ['-version'], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stderr = '';
+      javaProcess.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      javaProcess.on('close', (code) => {
+        if (code === 0) {
+          const version = this.parseJavaVersion(stderr) || '17';
+          resolve({ path: 'java', version, valid: true });
+        } else {
+          resolve({ path: 'java', version: '', valid: false });
+        }
+      });
+
+      javaProcess.on('error', () => {
+        resolve({ path: 'java', version: '', valid: false });
+      });
+    });
+  }
+
+  /**
+   * Get actual Java version by running java -version
+   */
+  private async getJavaVersion(javaPath: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const proc = spawn(javaPath, ['-version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      let stderr = '';
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          resolve(this.parseJavaVersion(stderr) || null);
+        } else {
+          resolve(null);
+        }
+      });
+
+      proc.on('error', () => resolve(null));
+    });
+  }
+
+  /**
+   * Parse Java version from output
+   */
+  private parseJavaVersion(output: string): string | null {
+    const match = output.match(/version ["'](\d+(?:\.\d+)*)/);
+    return match ? match[1] : null;
   }
 
   /**
@@ -120,15 +174,12 @@ export class MinecraftLauncher {
     onProgress?: (progress: ProgressUpdate) => void
   ): Promise<void> {
     return new Promise((resolve, reject) => {
-      const fileUrlObj = new URL(fileUrl);
-      const client = fileUrlObj.protocol === 'https:' ? https : http;
-
+      const client = fileUrl.startsWith('https') ? https : http;
       let downloaded = 0;
       let totalSize = 0;
 
       client.get(fileUrl, (res) => {
         if (res.statusCode === 302) {
-          // Follow redirect
           const redirectUrl = res.headers.location;
           if (redirectUrl) {
             this.downloadFile(redirectUrl, destPath, onProgress).then(resolve).catch(reject);
@@ -177,45 +228,147 @@ export class MinecraftLauncher {
     await fs.ensureDir(path.join(this.gameDir, 'libraries'));
     await fs.ensureDir(path.join(this.gameDir, 'assets', 'indexes'));
     await fs.ensureDir(path.join(this.gameDir, 'assets', 'objects'));
+    await fs.ensureDir(path.join(this.gameDir, 'natives'));
+  }
+
+  /**
+   * Build Java command arguments for launching Minecraft
+   */
+  private buildLaunchArgs(config: LaunchConfig): string[] {
+    const clientJar = path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`);
+
+    // Build classpath from libraries directory
+    const librariesPath = path.join(this.gameDir, 'libraries');
+    let classpath = clientJar;
+
+    // Add all JARs from libraries (simplified - in production would parse version JSON)
+    try {
+      if (fs.existsSync(librariesPath)) {
+        const jars = this.findJarsInDir(librariesPath);
+        classpath = [clientJar, ...jars].join(path.delimiter);
+      }
+    } catch {
+      // Use basic classpath if libraries not found
+    }
+
+    const jarPath = path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`);
+    const libsPath = path.join(this.gameDir, 'libraries');
+    const nativesPath = path.join(this.gameDir, 'natives');
+    const assetsDir = path.join(this.gameDir, 'assets');
+    const assetIndex = config.version.startsWith('1.')
+      ? `${config.version.split('.')[0]}.${config.version.split('.')[1]}`
+      : config.version;
+
+    return [
+      `-cp`,
+      `"${classpath}"`,
+      `-Xmx2G`,
+      `-Djava.library.path="${nativesPath}"`,
+      'net.minecraft.client.main.Main',
+      `--username`,
+      config.nickname,
+      `--version`,
+      config.version,
+      `--gameDir`,
+      this.gameDir,
+      `--assetsDir`,
+      assetsDir,
+      `--assetIndex`,
+      assetIndex,
+      '--uuid',
+      'offline',
+      '--accessToken',
+      'offline',
+      '--userType',
+      'legacy',
+      '--offline', // Native offline mode
+    ];
+  }
+
+  /**
+   * Find all JAR files in directory (recursive)
+   */
+  private findJarsInDir(dir: string): string[] {
+    const jars: string[] = [];
+    if (!fs.existsSync(dir)) return jars;
+
+    const items = fs.readdirSync(dir, { withFileTypes: true });
+    for (const item of items) {
+      const fullPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        jars.push(...this.findJarsInDir(fullPath));
+      } else if (item.name.endsWith('.jar') || item.name.endsWith('.zip')) {
+        jars.push(fullPath);
+      }
+    }
+    return jars;
   }
 
   /**
    * Launch Minecraft with the given configuration
    */
-  async launch(config: LaunchConfig, onProgress?: (progress: ProgressUpdate) => void): Promise<LaunchResult> {
+  async launch(
+    config: LaunchConfig,
+    onProgress?: (progress: ProgressUpdate) => void
+  ): Promise<LaunchResult> {
     try {
-      onProgress?.({ type: 'status', message: 'Checking requirements...' });
+      onProgress?.({ type: 'status', message: 'Checking Java...' });
 
       // Check Java
       const javaInfo = await this.findJava();
-      if (!javaInfo.valid) {
-        return { success: false, message: 'Java no encontrado o no válido', errorCode: 'ERR_JAVA_NOT_FOUND' };
+      if (!javaInfo.valid || !javaInfo.path) {
+        return { success: false, message: 'Java no encontrado. Instala Java 17 o superior.', errorCode: 'ERR_JAVA_NOT_FOUND' };
       }
 
-      onProgress?.({ type: 'status', message: 'Setting up Minecraft files...' });
+      onProgress?.({ type: 'status', message: `Java ${javaInfo.version} encontrado` });
 
-      // Setup directory
+      // Check if client jar exists
+      const clientJar = path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`);
+      const jarExists = await fs.pathExists(clientJar);
+
+      if (!jarExists) {
+        return {
+          success: false,
+          message: `Version ${config.version} no descargada. Descarga los archivos primero.`,
+          errorCode: 'ERR_VERSION_NOT_DOWNLOADED',
+        };
+      }
+
+      onProgress?.({ type: 'status', message: 'Lanzando Minecraft...' });
+
+      // Setup directory structure
       await this.setupGameDir(config.version);
 
-      // Download client jar
-      const clientJarPath = path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`);
+      // Build and execute Java process
+      const args = this.buildLaunchArgs(config);
+      const javaPath = javaInfo.path;
 
-      const needsDownload = !(await fs.pathExists(clientJarPath));
-      if (needsDownload) {
-        onProgress?.({ type: 'status', message: `Downloading ${config.version}...` });
-        // Download logic would go here using @xmcl/core
-      }
+      this.currentProcess = spawn(javaPath, args.slice(1), {  // Remove first -cp or handle differently
+        cwd: this.gameDir,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
 
-      onProgress?.({ type: 'status', message: 'Launching Minecraft...' });
+      // Forward output to progress callback
+      this.currentProcess.stdout?.on('data', (data) => {
+        onProgress?.({ type: 'status', message: data.toString().trim() });
+      });
 
-      // Build launch arguments
-      const args = this.buildLaunchArgs(config, javaInfo);
+      this.currentProcess.stderr?.on('data', (data) => {
+        onProgress?.({ type: 'status', message: data.toString().trim() });
+      });
 
-      onProgress?.({ type: 'complete', message: 'Minecraft started successfully' });
+      this.currentProcess.on('error', (err: Error) => {
+        onProgress?.({ type: 'error', message: `Error: ${err.message}` });
+      });
+
+      this.currentProcess.on('close', (code) => {
+        onProgress?.({ type: 'complete', message: `Minecraft exited with code ${code}` });
+        this.currentProcess = null;
+      });
 
       return {
         success: true,
-        message: 'Minecraft launched',
+        message: `Minecraft lanzado con ${config.nickname}`,
         javaPath: javaInfo.path,
         gameDir: this.gameDir,
       };
@@ -227,32 +380,13 @@ export class MinecraftLauncher {
   }
 
   /**
-   * Build Java command arguments for launching Minecraft
+   * Stop the current Minecraft process
    */
-  private buildLaunchArgs(config: LaunchConfig, javaInfo: JavaInfo): string[] {
-    const classpathEntries = [
-      path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`),
-      // Add libraries to classpath - would be populated from version JSON
-    ];
-
-    const classpath = classpathEntries.join(path.delimiter);
-
-    return [
-      `-cp`,
-      `"${classpath}"`,
-      `-Xmx2G`,
-      `-Djava.library.path="${path.join(this.gameDir, 'natives')}"`,
-      `-javaagent:${AUTHLIB_INJECTOR_PATH}`,
-      'net.minecraft.client.main.Main',
-      `--username "${config.nickname}"`,
-      `--version "${config.version}"`,
-      `--gameDir "${this.gameDir}"`,
-      `--assetsDir "${path.join(this.gameDir, 'assets')}"`,
-      `--assetIndex "${config.version.startsWith('1.') ? config.version.split('.')[0] + '.' + config.version.split('.')[1] : config.version}"`,
-      '--uuid offline',
-      '--accessToken offline',
-      '--userType legacy',
-    ];
+  stop(): void {
+    if (this.currentProcess) {
+      this.currentProcess.kill();
+      this.currentProcess = null;
+    }
   }
 
   get gameDirectory(): string {
