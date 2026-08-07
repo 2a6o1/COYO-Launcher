@@ -3,12 +3,18 @@
  * Routes IPC messages between renderer and main processes
  */
 
-import { ipcMain, IpcMainInvokeEvent } from 'electron';
+import { app, BrowserWindow, ipcMain, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
 import { MinecraftLauncher } from './launcher';
 import { VersionManifest, LaunchConfig, ProgressUpdate, LaunchResult } from '../renderer/types';
 
 const launcher = new MinecraftLauncher();
+let mainWin: BrowserWindow | null = null;
+
+// Track window for progress broadcasting
+ipcMain.handle('mcp:setMainWindow', async (_event: IpcMainInvokeEvent, win: BrowserWindow) => {
+  mainWin = win;
+});
 
 export function initIPC(): void {
   // Handle version manifest requests
@@ -42,21 +48,10 @@ export function initIPC(): void {
 
     return await launcher.launch(config, (progress: ProgressUpdate) => {
       // Broadcast progress updates to renderer
-      // In a full implementation, we'd send these viaIPC to the specific window
+      if (mainWin) {
+        mainWin.webContents.send('mcp:progress', progress);
+      }
     });
-  });
-
-  // Handle download version (for future expansion)
-  ipcMain.handle('mcp:downloadVersion', async (
-    _event: IpcMainInvokeEvent,
-    version: string,
-  ): Promise<{ success: boolean; message: string; error?: string }> => {
-    try {
-      // Future implementation for downloading specific versions
-      return { success: true, message: `Version ${version} ready for download` };
-    } catch (error) {
-      return { success: false, message: 'Download failed', error: (error as Error).message };
-    }
   });
 
   // Handle check if version is installed
@@ -67,6 +62,19 @@ export function initIPC(): void {
     const clientJar = `versions/${version}/${version}.jar`;
     const isInstalled = await checkFileExists(launcher.gameDirectory, clientJar);
     return { installed: isInstalled };
+  });
+
+  // Handle download version - REAL implementation
+  ipcMain.handle('mcp:downloadVersion', async (
+    _event: IpcMainInvokeEvent,
+    version: string,
+  ): Promise<{ success: boolean; message: string; errorCode?: string; downloadedFiles?: string[] }> => {
+    return await launcher.downloadVersion(version, (progress: ProgressUpdate) => {
+      // Broadcast progress to renderer
+      if (mainWin) {
+        mainWin.webContents.send('mcp:progress', progress);
+      }
+    });
   });
 }
 

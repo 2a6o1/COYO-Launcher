@@ -17,9 +17,28 @@ import {
   ProgressUpdate,
 } from '../renderer/types';
 
-const MANIFEST_URL = 'https://launchermeta.mojang.com/mc/game/version_manifest.json';
+const MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest.json';
 
 export class MinecraftLauncher {
+  // Known working mirrors for old versions (Mojang hosts are deprecated)
+  private static readonly VERSION_MIRRORS: Record<string, { client: string; assets: string }> = {
+    '1.20.4': {
+      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.4/client-1.20.4.jar',
+      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.4/client-1.20.4.jar',
+    },
+    '1.20.3': {
+      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.3/client-1.20.3.jar',
+      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.3/client-1.20.3.jar',
+    },
+    '1.20.2': {
+      client: 'https://maven.fabricmc.net/net/minecraft/client/1.20.2/client-1.20.2.jar',
+      assets: 'https://maven.fabricmc.net/net/minecraft/client/1.20.2/client-1.20.2.jar',
+    },
+  };
+
+  // Known libraries mirrors
+  private static readonly LIBRARIES_MIRROR = 'https://maven.fabricmc.net';
+
   private gameDir: string;
   private versionsCache: VersionManifest | null = null;
   private currentProcess: ChildProcessWithoutNullStreams | null = null;
@@ -245,14 +264,12 @@ export class MinecraftLauncher {
     try {
       if (fs.existsSync(librariesPath)) {
         const jars = this.findJarsInDir(librariesPath);
-        classpath = [clientJar, ...jars].join(path.delimiter);
+        classpath = [...jars, clientJar].join(path.delimiter);
       }
     } catch {
       // Use basic classpath if libraries not found
     }
 
-    const jarPath = path.join(this.gameDir, 'versions', config.version, `${config.version}.jar`);
-    const libsPath = path.join(this.gameDir, 'libraries');
     const nativesPath = path.join(this.gameDir, 'natives');
     const assetsDir = path.join(this.gameDir, 'assets');
     const assetIndex = config.version.startsWith('1.')
@@ -260,20 +277,20 @@ export class MinecraftLauncher {
       : config.version;
 
     return [
-      `-cp`,
-      `"${classpath}"`,
-      `-Xmx2G`,
+      '-cp',
+      classpath,
+      '-Xmx2G',
       `-Djava.library.path="${nativesPath}"`,
       'net.minecraft.client.main.Main',
-      `--username`,
+      '--username',
       config.nickname,
-      `--version`,
+      '--version',
       config.version,
-      `--gameDir`,
+      '--gameDir',
       this.gameDir,
-      `--assetsDir`,
+      '--assetsDir',
       assetsDir,
-      `--assetIndex`,
+      '--assetIndex',
       assetIndex,
       '--uuid',
       'offline',
@@ -343,7 +360,7 @@ export class MinecraftLauncher {
       const args = this.buildLaunchArgs(config);
       const javaPath = javaInfo.path;
 
-      this.currentProcess = spawn(javaPath, args.slice(1), {  // Remove first -cp or handle differently
+      this.currentProcess = spawn(javaPath, args, {
         cwd: this.gameDir,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -387,6 +404,251 @@ export class MinecraftLauncher {
       this.currentProcess.kill();
       this.currentProcess = null;
     }
+  }
+
+  /**
+   * Get version details from Mojang's version manifest
+   */
+  async getVersionDetails(versionId: string): Promise<any> {
+    const manifest = await this.getVersionManifest();
+    const versionEntry = manifest.versions.find(v => v.id === versionId);
+
+    if (!versionEntry) {
+      throw new Error(`Version ${versionId} not found in manifest`);
+    }
+
+    const versionDetails = await this.fetchJson<any>(versionEntry.url);
+    return versionDetails;
+  }
+
+  /**
+   * Download a complete Minecraft version with libraries
+   */
+  async downloadVersion(
+    version: string,
+    onProgress?: (progress: ProgressUpdate) => void
+  ): Promise<{ success: boolean; message: string; errorCode?: string; downloadedFiles?: string[] }> {
+    try {
+      console.log(`[Download] Starting download for version ${version}`);
+      onProgress?.({ type: 'status', message: `Obteniendo información de versión ${version}...` });
+
+      // Get version details
+      const versionDetails = await this.getVersionDetails(version);
+
+      // Setup directories
+      const versionDir = path.join(this.gameDir, 'versions', version);
+      const librariesDir = path.join(this.gameDir, 'libraries');
+      const assetsDir = path.join(this.gameDir, 'assets', 'indexes');
+
+      await fs.ensureDir(versionDir);
+      await fs.ensureDir(librariesDir);
+      await fs.ensureDir(assetsDir);
+
+      const downloadedFiles: string[] = [];
+      let totalFiles = 0;
+      let downloadedCount = 0;
+
+      // Count total files (client jar + libraries)
+      const libraries = versionDetails.libraries || [];
+      totalFiles = 1 + libraries.length; // 1 for client jar
+
+      // Helper to fix URLs - use FabricMC mirrors for Mojang hosts that are down
+      const fixUrl = (url: string, libName?: string, libVersion?: string): string => {
+        try {
+          const parsed = new URL(url);
+
+          // Detect Mojang hosts that may be unreachable - redirect to FabricMC mirrors
+          if (parsed.hostname.includes('mojang.com') || parsed.hostname.includes('.minecraft.net')) {
+            console.log(`[Download] Mojang host detected: ${parsed.hostname}`);
+            // For libraries.minecraft.net URLs, build FabricMC URL from library name
+            if (parsed.hostname.includes('libraries.minecraft.net') && libName && libVersion) {
+              const parts = libName.split(':');
+              if (parts.length >= 3) {
+                const groupId = parts[0];
+                const artifactId = parts[1];
+                const version = parts[2];
+                const libPath = groupId.replace(/\./g, '/') + `/${artifactId}/${version}/${artifactId}-${version}.jar`;
+                const fabricUrl = `https://maven.fabricmc.net/${libPath}`;
+                console.log(`[Download] Using FabricMC mirror: ${fabricUrl}`);
+                return fabricUrl;
+              }
+            }
+            // For piston-data.mojang.com client URLs, try FabricMC
+            if (parsed.hostname === 'piston-data.mojang.com') {
+              const versionMatch = parsed.pathname.match(/client-([\d.]+)\.jar$/);
+              if (versionMatch) {
+                const clientVersion = versionMatch[1];
+                const fabricUrl = `https://maven.fabricmc.net/net/minecraft/client/${clientVersion}/client-${clientVersion}.jar`;
+                console.log(`[Download] Using FabricMC mirror: ${fabricUrl}`);
+                return fabricUrl;
+              }
+            }
+          }
+
+          return parsed.toString();
+        } catch (e) {
+          console.log(`[Download] URL parse error: ${(e as Error).message}`);
+          return url;
+        }
+      };
+
+      // Download client jar - use mirror for old versions
+      const clientJarPath = path.join(versionDir, `${version}.jar`);
+      console.log(`[Download] Downloading client.jar (${version}.jar)`);
+      onProgress?.({ type: 'progress', message: 'Descargando client.jar...', percent: 0 });
+
+      // Check if we have a known working mirror
+      const mirror = (MinecraftLauncher as any).VERSION_MIRRORS?.[version];
+      const rawClientUrl = mirror?.client || versionDetails.downloads?.artifact?.url;
+      const clientUrl = fixUrl(rawClientUrl);
+
+      if (clientUrl) {
+        try {
+          await this.downloadFile(
+            clientUrl,
+            clientJarPath,
+            (p) => {
+              console.log(`[Download] client.jar: ${p.percent}%`);
+              onProgress?.({ ...p, message: 'Descargando client.jar...' });
+            }
+          );
+          downloadedFiles.push('client.jar');
+          downloadedCount++;
+          console.log(`[Download] OK client.jar`);
+        } catch (e) {
+          console.log(`[Download] FAIL client.jar: ${(e as Error).message}`);
+          throw e;
+        }
+      }
+
+      const percent = Math.round((downloadedCount / totalFiles) * 100);
+      onProgress?.({
+        type: 'progress',
+        message: `Progreso: ${downloadedCount}/${totalFiles}`,
+        percent
+      });
+
+      // Download libraries
+      console.log(`[Download] Downloading ${libraries.length} libraries...`);
+
+      for (const lib of libraries) {
+        if (!lib.name || !lib.downloads?.artifact?.url) {
+          console.log(`[Download] SKIP invalid lib entry`);
+          continue;
+        }
+
+        // Parse library name (format: groupId:artifactId:version)
+        const parts = lib.name.split(':');
+        if (parts.length < 3) continue;
+
+        const groupId = parts[0];
+        const artifactId = parts[1];
+        const libVersion = parts[2];
+
+        // Validate and fix URL (pass library info for FabricMC mirror)
+        let downloadUrl = fixUrl(lib.downloads.artifact.url, lib.name, libVersion);
+        try {
+          new URL(downloadUrl);
+        } catch {
+          console.log(`[Download] SKIP invalid URL`);
+          continue;
+        }
+
+        // Create library directory structure
+        const libDirParts = groupId.split('.');
+        const libDir = path.join(librariesDir, ...libDirParts, artifactId, libVersion);
+        await fs.ensureDir(libDir);
+
+        const libJarName = `${artifactId}-${libVersion}.jar`;
+        const libJarPath = path.join(libDir, libJarName);
+
+        // Check if library already exists with same size
+        let needsDownload = true;
+        try {
+          const existingStats = await fs.stat(libJarPath);
+          if (existingStats.size === lib.downloads?.artifact?.size) {
+            needsDownload = false;
+            console.log(`[Download] SKIP ${libJarName} (exists)`);
+          }
+        } catch {
+          needsDownload = true;
+        }
+
+        if (needsDownload) {
+          console.log(`[Download] DL ${libJarName}...`);
+          await this.downloadFile(
+            downloadUrl,
+            libJarPath,
+            (p) => {
+              if (typeof p.percent === 'number') {
+                console.log(`[Download] ${libJarName}: ${p.percent}%`);
+              }
+              onProgress?.({
+                type: 'progress',
+                message: `Descargando ${libJarName}...`,
+                percent: Math.round((downloadedCount / totalFiles) * 100)
+              });
+            }
+          );
+          downloadedFiles.push(libJarName);
+          console.log(`[Download] OK ${libJarName}`);
+        }
+
+        downloadedCount++;
+        const percent = Math.round((downloadedCount / totalFiles) * 100);
+        onProgress?.({ type: 'progress', message: `Progreso: ${downloadedCount}/${totalFiles}`, percent });
+      }
+
+      // Download assets index if available
+      if (versionDetails.assets) {
+        // assets can be a string URL or an object {id, url}
+        let assetIndexUrl: string | null = null;
+
+        if (typeof versionDetails.assets === 'string') {
+          assetIndexUrl = versionDetails.assets;
+        } else if (versionDetails.assets && typeof versionDetails.assets === 'object') {
+          // Try to get URL from assets object
+          const assetsObj = versionDetails.assets as { id?: string; url?: string };
+          if (assetsObj.url) {
+            assetIndexUrl = assetsObj.url;
+          }
+        }
+
+        if (assetIndexUrl) {
+          onProgress?.({ type: 'status', message: 'Descargando assets...' });
+          console.log(`[Download] Downloading assets index...`);
+
+          const assetIndexPath = path.join(assetsDir, 'assets.json');
+          await this.downloadFile(
+            assetIndexUrl,
+            assetIndexPath,
+            (p) => {
+              console.log(`[Download] Assets index: ${p.percent}%`);
+              onProgress?.({ ...p, message: 'Descargando assets index...' });
+            }
+          );
+          downloadedFiles.push('assets-index');
+          console.log(`[Download] ✓ Assets index descargado`);
+        }
+      }
+
+      return {
+        success: true,
+        message: `Versión ${version} descargada correctamente`,
+        downloadedFiles,
+      };
+    } catch (error) {
+      const err = error as Error;
+      return { success: false, message: err.message, errorCode: 'ERR_DOWNLOAD_FAILED' };
+    }
+  }
+
+  /**
+   * Check if a version is installed and complete
+   */
+  async isVersionInstalled(version: string): Promise<boolean> {
+    const clientJar = path.join(this.gameDir, 'versions', version, `${version}.jar`);
+    return fs.pathExists(clientJar);
   }
 
   get gameDirectory(): string {

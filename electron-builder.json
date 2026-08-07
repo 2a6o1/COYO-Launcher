@@ -2,7 +2,8 @@
   "appId": "com.fallenangel.launcher",
   "productName": "FallenAngel Launcher",
   "directories": {
-    "output": "dist"
+    "output": "dist",
+    "packager": "dist"
   },
   "win": {
     "target": "nsis"

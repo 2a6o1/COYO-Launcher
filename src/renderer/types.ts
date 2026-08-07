@@ -8,10 +8,29 @@ export interface VersionInfo {
   type: 'release' | 'snapshot' | 'old_beta' | 'historic';
   time: string;
   releaseTime: string;
+  url: string;
+}
+
+export interface VersionDetails {
+  id: string;
+  type: 'release' | 'snapshot' | 'old_beta' | 'historic';
+  time: string;
+  releaseTime: string;
   mainClass: string;
   assets: string;
   libraries: Library[];
-  downloads: Downloads;
+  downloads: VersionDownloads;
+}
+
+export interface VersionDownloads {
+  artifact?: DownloadInfo;
+  clientside?: DownloadInfo;
+  server?: DownloadInfo;
+  classifiers?: {
+    'natives-linux': DownloadInfo;
+    'natives-windows': DownloadInfo;
+    'natives-osx': DownloadInfo;
+  };
 }
 
 export interface Library {
@@ -48,7 +67,13 @@ export interface DownloadInfo {
 
 export interface VersionManifest {
   latestRelease: string;
-  versions: { id: string; type: string; url: string; time: string; releaseTime: string }[];
+  versions: Array<{
+    id: string;
+    type: string;
+    url: string;
+    time: string;
+    releaseTime: string;
+  }>;
 }
 
 export interface ProgressUpdate {
@@ -84,4 +109,18 @@ export interface DownloadStatus {
   downloadedSize: number;
   filePath: string;
   speed?: number;
+}
+
+export interface DownloadVersionResult {
+  success: boolean;
+  message: string;
+  version?: string;
+  errorCode?: string;
+  downloadedFiles?: string[];
+}
+
+export interface CheckVersionResult {
+  installed: boolean;
+  version?: string;
+  reason?: string;
 }

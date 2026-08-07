@@ -2,7 +2,7 @@
  * Tests for shared types
  */
 
-import { VersionInfo, LaunchConfig, JavaInfo } from '../renderer/types';
+import { VersionInfo, VersionDetails, LaunchConfig, JavaInfo } from '../renderer/types';
 
 describe('TypeScript Types', () => {
   it('should define VersionInfo type correctly', () => {
@@ -11,10 +11,7 @@ describe('TypeScript Types', () => {
       type: 'release',
       time: '2024-01-01T00:00:00Z',
       releaseTime: '2024-01-01T00:00:00Z',
-      mainClass: 'net.minecraft.client.main.Main',
-      assets: '1.20',
-      libraries: [],
-      downloads: {},
+      url: 'https://example.com/version.json',
     };
 
     expect(version.id).toBe('1.20.4');
@@ -41,5 +38,27 @@ describe('TypeScript Types', () => {
     };
 
     expect(java.valid).toBe(true);
+  });
+
+  it('should define VersionDetails type correctly', () => {
+    const details: VersionDetails = {
+      id: '1.20.4',
+      type: 'release',
+      time: '2024-01-01T00:00:00Z',
+      releaseTime: '2024-01-01T00:00:00Z',
+      mainClass: 'net.minecraft.client.main.Main',
+      assets: '1.20',
+      libraries: [],
+      downloads: {
+        artifact: {
+          url: 'https://example.com/client.jar',
+          sha1: 'abc123',
+          size: 12345,
+        },
+      },
+    };
+
+    expect(details.id).toBe('1.20.4');
+    expect(details.downloads?.artifact?.url).toBe('https://example.com/client.jar');
   });
 });

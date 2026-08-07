@@ -21,6 +21,8 @@
 2. d5ab397 - feat: initial Minecraft launcher MVP implementation
 3. 7cad5af - feat: compile TypeScript and fix type issues
 4. 19825f0 - docs: add README and project documentation
+5. 56ceb47 - chore: update gitignore for pnpm and superpowers
+6. 49e0232 - feat: implement real Java process launching
 
 ## Final Status
 - MVP Core: ✅ COMPLETE

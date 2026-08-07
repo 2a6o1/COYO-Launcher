@@ -6,6 +6,9 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import { initIPC } from './ipc-handlers';
+import { MinecraftLauncher } from './launcher';
+
+const launcher = new MinecraftLauncher();
 
 // Type extensions for process in Electron context
 declare namespace NodeJS {
@@ -37,7 +40,7 @@ function createWindow(): void {
     title: 'FallenAngel Launcher',
   });
 
-  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
   if (IS_DEV) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -68,11 +71,16 @@ async function initializeApp(): Promise<void> {
 }
 
 async function checkJava(): Promise<{ found: boolean; path?: string; version?: string }> {
-  return new Promise((resolve) => {
-    // Simple Java check - in production, use proper detection
-    const javaPath = process.env.JAVA_HOME || 'java';
-    resolve({ found: true, path: javaPath, version: '17' });
-  });
+  try {
+    const javaInfo = await launcher.findJava();
+    return {
+      found: javaInfo.valid,
+      path: javaInfo.path,
+      version: javaInfo.version,
+    };
+  } catch {
+    return { found: false };
+  }
 }
 
 // App event handlers
