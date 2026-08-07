@@ -20,7 +20,7 @@ import {
 const MANIFEST_URL = 'https://piston-meta.mojang.com/mc/game/version_manifest.json';
 
 export class MinecraftLauncher {
-  // Known working client jar URLs (for versions where manifests are unavailable)
+  // Known working client jar URLs (for versions where manifests are unavailable or slow)
   // These are direct piston-data.mojang.com URLs that still work
   private static readonly VERSION_MIRRORS: Record<string, { client: string; assets: string }> = {
     '1.20.4': {
@@ -28,14 +28,25 @@ export class MinecraftLauncher {
       assets: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
     },
     '1.20.3': {
-      client: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
-      assets: 'https://piston-data.mojang.com/v1/objects/fd19469fed4a4b4c15b2d5133985f0e3e7816a8a/client.jar',
+      client: 'https://piston-data.mojang.com/v1/objects/b178a327a96f2cf1c9f98a45e5588d654a3e4369/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/b178a327a96f2cf1c9f98a45e5588d654a3e4369/client.jar',
     },
     '1.20.2': {
       client: 'https://piston-data.mojang.com/v1/objects/82d1974e75fc984c5ed4b038e764e50958ac61a0/client.jar',
       assets: 'https://piston-data.mojang.com/v1/objects/82d1974e75fc984c5ed4b038e764e50958ac61a0/client.jar',
     },
-    // Add more version URLs as needed
+    '1.21.7': {
+      client: 'https://piston-data.mojang.com/v1/objects/a2db1ea98c37b2d00c83f6867fb8bb581a593e07/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/a2db1ea98c37b2d00c83f6867fb8bb581a593e07/client.jar',
+    },
+    '1.21.8': {
+      client: 'https://piston-data.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar',
+    },
+    '26.2': {
+      client: 'https://piston-data.mojang.com/v1/objects/2dc72797acbc1b63fc16a11c4ac393605f453754/client.jar',
+      assets: 'https://piston-data.mojang.com/v1/objects/2dc72797acbc1b63fc16a11c4ac393605f453754/client.jar',
+    },
   };
 
   // Known libraries mirrors
@@ -475,7 +486,9 @@ export class MinecraftLauncher {
 
       // Get client URL - check VERSION_MIRRORS first for old versions
       const mirror = (MinecraftLauncher as any).VERSION_MIRRORS?.[version];
-      const rawClientUrl = mirror?.client || versionDetails.downloads?.artifact?.url;
+      // Handle both old (downloads.artifact.url) and new (downloads.client.url) structures
+      const clientUrlFromManifest = versionDetails.downloads?.client?.url || versionDetails.downloads?.artifact?.url;
+      const rawClientUrl = mirror?.client || clientUrlFromManifest;
 
       // Try Mojang URL, fallback to FabricMC if needed
       let clientUrl = rawClientUrl;
@@ -695,6 +708,8 @@ export class MinecraftLauncher {
       };
     } catch (error) {
       const err = error as Error;
+      console.log(`[Download] ERROR: ${err.message}`);
+      console.log(`[Download] STACK: ${err.stack}`);
       return { success: false, message: err.message, errorCode: 'ERR_DOWNLOAD_FAILED' };
     }
   }
