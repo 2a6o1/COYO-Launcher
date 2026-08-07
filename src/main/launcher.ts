@@ -512,7 +512,14 @@ export class MinecraftLauncher {
                         msg.includes('UnsatisfiedLinkError') ||
                         msg.includes('Failed to load');
 
-        if (isError) {
+        // Detect UnsupportedClassVersionError specifically
+        if (msg.includes('UnsupportedClassVersionError')) {
+          immediateError = true;
+          const versionMatch = msg.match(/class file version (\d+\.0)/);
+          const requiredVersion = versionMatch ? versionMatch[1] : 'desconocida';
+          const javaVersion = javaInfo.version || 'desconocida';
+          onProgress?.({ type: 'error', message: `❌ Error de versión: Minecraft requiere Java ${requiredVersion} (tienes Java ${javaVersion}). Instala Java 21 para versiones 1.21+ o usa versión 1.20.4.` });
+        } else if (isError) {
           immediateError = true;
           onProgress?.({ type: 'error', message: msg });
         }
