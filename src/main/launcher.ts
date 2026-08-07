@@ -452,44 +452,17 @@ export class MinecraftLauncher {
       const libraries = versionDetails.libraries || [];
       totalFiles = 1 + libraries.length; // 1 for client jar
 
-      // Helper to fix URLs - use FabricMC mirrors for Mojang hosts that are down
-      const fixUrl = (url: string, libName?: string, libVersion?: string): string => {
-        try {
-          const parsed = new URL(url);
-
-          // Detect Mojang hosts that may be unreachable - redirect to FabricMC mirrors
-          if (parsed.hostname.includes('mojang.com') || parsed.hostname.includes('.minecraft.net')) {
-            console.log(`[Download] Mojang host detected: ${parsed.hostname}`);
-            // For libraries.minecraft.net URLs, build FabricMC URL from library name
-            if (parsed.hostname.includes('libraries.minecraft.net') && libName && libVersion) {
-              const parts = libName.split(':');
-              if (parts.length >= 3) {
-                const groupId = parts[0];
-                const artifactId = parts[1];
-                const version = parts[2];
-                const libPath = groupId.replace(/\./g, '/') + `/${artifactId}/${version}/${artifactId}-${version}.jar`;
-                const fabricUrl = `https://maven.fabricmc.net/${libPath}`;
-                console.log(`[Download] Using FabricMC mirror: ${fabricUrl}`);
-                return fabricUrl;
-              }
-            }
-            // For piston-data.mojang.com client URLs, try FabricMC
-            if (parsed.hostname === 'piston-data.mojang.com') {
-              const versionMatch = parsed.pathname.match(/client-([\d.]+)\.jar$/);
-              if (versionMatch) {
-                const clientVersion = versionMatch[1];
-                const fabricUrl = `https://maven.fabricmc.net/net/minecraft/client/${clientVersion}/client-${clientVersion}.jar`;
-                console.log(`[Download] Using FabricMC mirror: ${fabricUrl}`);
-                return fabricUrl;
-              }
-            }
-          }
-
-          return parsed.toString();
-        } catch (e) {
-          console.log(`[Download] URL parse error: ${(e as Error).message}`);
-          return url;
+      // Help to build FabricMC library URL from library name
+      const buildFabricLibUrl = (libName: string): string => {
+        const parts = libName.split(':');
+        if (parts.length >= 3) {
+          const groupId = parts[0];
+          const artifactId = parts[1];
+          const libVersion = parts[2];
+          const libPath = groupId.replace(/\./g, '/') + `/${artifactId}/${libVersion}/${artifactId}-${libVersion}.jar`;
+          return `https://maven.fabricmc.net/${libPath}`;
         }
+        return '';
       };
 
       // Download client jar - use mirror for old versions
@@ -497,10 +470,23 @@ export class MinecraftLauncher {
       console.log(`[Download] Downloading client.jar (${version}.jar)`);
       onProgress?.({ type: 'progress', message: 'Descargando client.jar...', percent: 0 });
 
-      // Check if we have a known working mirror
+      // Get client URL - check VERSION_MIRRORS first for old versions
       const mirror = (MinecraftLauncher as any).VERSION_MIRRORS?.[version];
       const rawClientUrl = mirror?.client || versionDetails.downloads?.artifact?.url;
-      const clientUrl = fixUrl(rawClientUrl);
+
+      // Try Mojang URL, fallback to FabricMC if needed
+      let clientUrl = rawClientUrl;
+      if (rawClientUrl) {
+        try {
+          const parsed = new URL(rawClientUrl);
+          if (parsed.hostname.includes('.minecraft.net') || parsed.hostname.includes('mojang.com')) {
+            // For piston-data.mojang.com, try Mojang first, will use FabricMC on failure
+            console.log(`[Download] Using Mojang client URL: ${rawClientUrl}`);
+          }
+        } catch {
+          console.log(`[Download] Using Mojang client URL: ${rawClientUrl}`);
+        }
+      }
 
       if (clientUrl) {
         try {
@@ -516,8 +502,32 @@ export class MinecraftLauncher {
           downloadedCount++;
           console.log(`[Download] OK client.jar`);
         } catch (e) {
-          console.log(`[Download] FAIL client.jar: ${(e as Error).message}`);
-          throw e;
+          const errMsg = (e as Error).message;
+          console.log(`[Download] FAIL client.jar: ${errMsg}`);
+          // Try FabricMC mirror as fallback for Mojang hosts
+          const versionMatch = clientUrl.match(/client-([\d.]+)\.jar$/);
+          if (versionMatch) {
+            const fabricClientUrl = `https://maven.fabricmc.net/net/minecraft/client/${versionMatch[1]}/client-${versionMatch[1]}.jar`;
+            console.log(`[Download] Trying FabricMC fallback: ${fabricClientUrl}`);
+            try {
+              await this.downloadFile(
+                fabricClientUrl,
+                clientJarPath,
+                (p) => {
+                  console.log(`[Download] client.jar (FabricMC): ${p.percent}%`);
+                  onProgress?.({ ...p, message: 'Descargando client.jar (mirror)...' });
+                }
+              );
+              downloadedFiles.push('client.jar');
+              downloadedCount++;
+              console.log(`[Download] OK client.jar (from FabricMC)`);
+            } catch (e2) {
+              console.log(`[Download] FabricMC fallback also failed: ${(e2 as Error).message}`);
+              throw e;
+            }
+          } else {
+            throw e;
+          }
         }
       }
 
@@ -545,8 +555,14 @@ export class MinecraftLauncher {
         const artifactId = parts[1];
         const libVersion = parts[2];
 
-        // Validate and fix URL (pass library info for FabricMC mirror)
-        let downloadUrl = fixUrl(lib.downloads.artifact.url, lib.name, libVersion);
+        // Try Mojang URL first, build FabricMC fallback
+        let downloadUrl = lib.downloads.artifact.url;
+        try {
+          new URL(downloadUrl);
+        } catch {
+          console.log(`[Download] SKIP invalid URL`);
+          continue;
+        }
         try {
           new URL(downloadUrl);
         } catch {
@@ -576,22 +592,65 @@ export class MinecraftLauncher {
 
         if (needsDownload) {
           console.log(`[Download] DL ${libJarName}...`);
-          await this.downloadFile(
-            downloadUrl,
-            libJarPath,
-            (p) => {
-              if (typeof p.percent === 'number') {
-                console.log(`[Download] ${libJarName}: ${p.percent}%`);
-              }
-              onProgress?.({
-                type: 'progress',
-                message: `Descargando ${libJarName}...`,
-                percent: Math.round((downloadedCount / totalFiles) * 100)
-              });
+          let libUrl = downloadUrl;
+
+          // Check if we're using a Mojang library host and build FabricMC fallback
+          let fabricFallback = '';
+          try {
+            const parsed = new URL(downloadUrl);
+            if (parsed.hostname.includes('libraries.minecraft.net')) {
+              fabricFallback = buildFabricLibUrl(lib.name);
             }
-          );
-          downloadedFiles.push(libJarName);
-          console.log(`[Download] OK ${libJarName}`);
+          } catch {
+            // Invalid URL, skip
+          }
+
+          try {
+            await this.downloadFile(
+              libUrl,
+              libJarPath,
+              (p) => {
+                if (typeof p.percent === 'number') {
+                  console.log(`[Download] ${libJarName}: ${p.percent}%`);
+                }
+                onProgress?.({
+                  type: 'progress',
+                  message: `Descargando ${libJarName}...`,
+                  percent: Math.round((downloadedCount / totalFiles) * 100)
+                });
+              }
+            );
+            downloadedFiles.push(libJarName);
+            console.log(`[Download] OK ${libJarName}`);
+          } catch (e) {
+            // Try FabricMC fallback if available
+            if (fabricFallback) {
+              console.log(`[Download] Trying FabricMC fallback for ${libJarName}`);
+              try {
+                await this.downloadFile(
+                  fabricFallback,
+                  libJarPath,
+                  (p) => {
+                    if (typeof p.percent === 'number') {
+                      console.log(`[Download] ${libJarName} (FabricMC): ${p.percent}%`);
+                    }
+                    onProgress?.({
+                      type: 'progress',
+                      message: `Descargando ${libJarName} (mirror)...`,
+                      percent: Math.round((downloadedCount / totalFiles) * 100)
+                    });
+                  }
+                );
+                downloadedFiles.push(libJarName);
+                console.log(`[Download] OK ${libJarName} (from FabricMC)`);
+              } catch (e2) {
+                console.log(`[Download] FabricMC fallback failed for ${libJarName}: ${(e2 as Error).message}`);
+                throw e;
+              }
+            } else {
+              throw e;
+            }
+          }
         }
 
         downloadedCount++;
