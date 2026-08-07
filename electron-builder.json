@@ -1,0 +1,16 @@
+{
+  "appId": "com.fallenangel.launcher",
+  "productName": "FallenAngel Launcher",
+  "directories": {
+    "output": "dist"
+  },
+  "win": {
+    "target": "nsis"
+  },
+  "mac": {
+    "target": "dmg"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"]
+  }
+}
