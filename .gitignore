@@ -29,5 +29,10 @@ Thumbs.db
 
 # Package lock files (choose one)
 package-lock.json
-pnpm-lock.yaml
 yarn.lock
+
+# pnpm
+pnpm-workspace.yaml
+
+# Superpowers
+.superpowers/
