@@ -173,7 +173,7 @@ async function loadVersions(): Promise<void> {
 }
 
 /**
- * Check Java installation
+ * Check Java installation and verify version compatibility
  */
 async function checkJava(): Promise<void> {
   try {
@@ -182,6 +182,14 @@ async function checkJava(): Promise<void> {
     if (result.success && result.java) {
       javaPath = result.java.path;
       log(`Java ${result.java.version} encontrado en: ${result.java.path}`);
+
+      // Check version compatibility warning
+      if (selectedVersion && selectedVersion.startsWith('1.21')) {
+        const javaVersionNum = parseInt(result.java.version.split('.')[0] || '0', 10);
+        if (javaVersionNum < 21) {
+          log(`⚠️ Versión ${selectedVersion} requiere Java 21. Tienes Java ${result.java.version}. Considera usar una versión 1.20.x o instalar Java 21.`, 'warning');
+        }
+      }
     } else {
       log('Java no encontrado o no válido', 'warning');
     }

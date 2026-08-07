@@ -101,6 +101,16 @@ export interface LaunchResult {
   gameDir?: string;
 }
 
+// Common error codes
+export type LaunchErrorCode =
+  | 'ERR_JAVA_NOT_FOUND'
+  | 'ERR_JAVA_VERSION'
+  | 'ERR_VERSION_NOT_DOWNLOADED'
+  | 'ERR_DOWNLOAD_FAILED'
+  | 'ERR_INVALID_CONFIG'
+  | 'ERR_LAUNCH_FAILED'
+  | 'ERR_CLASSPATH';
+
 export interface LaunchConfig {
   version: string;
   nickname: string;

@@ -401,6 +401,21 @@ export class MinecraftLauncher {
   }
 
   /**
+   * Get minimum required Java version for a Minecraft version
+   */
+  private getRequiredJavaVersion(minecraftVersion: string): string {
+    // Minecraft 1.21+ requires Java 21
+    const match = minecraftVersion.match(/^(\d+)\./);
+    if (match) {
+      const major = parseInt(match[1], 10);
+      if (major >= 21) {
+        return '21';
+      }
+    }
+    return '17';
+  }
+
+  /**
    * Launch Minecraft with the given configuration
    */
   async launch(
@@ -412,6 +427,19 @@ export class MinecraftLauncher {
 
       // Check Java
       const javaInfo = await this.findJava();
+
+      // Verify Java version for this Minecraft version
+      const requiredJavaVersion = this.getRequiredJavaVersion(config.version);
+      const javaVersionNum = parseInt(javaInfo.version || '0', 10);
+      const requiredJavaNum = parseInt(requiredJavaVersion, 10);
+
+      if (javaInfo.valid && javaVersionNum < requiredJavaNum) {
+        return {
+          success: false,
+          message: `Versión ${config.version} requiere Java ${requiredJavaVersion} o superior. Tienes Java ${javaInfo.version}.`,
+          errorCode: 'ERR_JAVA_VERSION',
+        };
+      }
       if (!javaInfo.valid || !javaInfo.path) {
         return { success: false, message: 'Java no encontrado. Instala Java 17 o superior.', errorCode: 'ERR_JAVA_NOT_FOUND' };
       }
