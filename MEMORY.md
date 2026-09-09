@@ -1,0 +1,4 @@
+- [Loading Screen Design Spec](docs/superpowers/specs/2026-08-07-openlauncher-loading-screen-design.md) — design spec for loading screen
+- [GUI Reorganization Design Spec](docs/superpowers/specs/2026-08-07-openlauncher-gui-reorganization-design.md) — design spec for beginner mode GUI
+- [Loading Screen Implementation Plan](docs/superpowers/plans/2026-08-07-openlauncher-loading-screen.md) — implementation plan
+- [Windows ICU Error (network storage)](memory/windows-icu-error-network-storage.md) — "Invalid file descriptor to ICU data received" = Electron #42624 mmap-on-network-storage limitation; build is correct, must run from local drive
