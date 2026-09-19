@@ -53,6 +53,12 @@ const FABRIC_INSTALLER_MAVEN_METADATA_URL = 'https://maven.fabricmc.net/net/fabr
 const FORGE_PROMOTIONS_URL = 'https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json';
 let windowStateSaveTimer = null;
 
+// ── Meteor Client Configuration ───────────────────────────────
+const METEOR_CLIENT_VERSION = "26.2";
+const METEOR_LOADER_VERSION = "0.19.3";
+const METEOR_PROFILE_ID = `fabric-loader-${METEOR_LOADER_VERSION}-${METEOR_CLIENT_VERSION}`;
+const METEOR_PROFILE_NAME = `Meteor Client ${METEOR_CLIENT_VERSION}`;
+
 function getWindowStatePath() {
   return path.join(app.getPath('userData'), WINDOW_STATE_FILE);
 }
@@ -947,6 +953,28 @@ async function detectJava(opts) {
     path: choice.javaCmd,
     source: choice.javaMajor ? `detected (Java ${choice.javaMajor})` : choice.javaCmd,
   };
+}
+
+// === Copia el .jar de Meteor Client a la carpeta mods/ ===
+async function copyMeteorModToMods(minecraftRoot) {
+  const modsDir = path.join(minecraftRoot, 'mods');
+  await fs.promises.mkdir(modsDir, { recursive: true });
+
+  const sourcePath = path.join(__dirname, 'meteor', 'meteor-client-26.2-local.jar');
+  const destPath = path.join(modsDir, 'meteor-client-26.2-local.jar');
+
+  if (fs.existsSync(destPath)) {
+    try {
+      const srcStat = fs.statSync(sourcePath);
+      const destStat = fs.statSync(destPath);
+      if (srcStat.size === destStat.size) {
+        return destPath;
+      }
+    } catch {}
+  }
+
+  await fs.promises.copyFile(sourcePath, destPath);
+  return destPath;
 }
 
 async function downloadToFile(url, outPath, installId, fileLabel = null) {
@@ -1931,6 +1959,80 @@ ipcMain.handle('minecraft:install', async (_, opts) => {
   } catch (error) {
     try { mainWindow?.webContents.send('minecraft:install-error', { type, version, message: error?.message }); } catch (e) {}
     return { error: 'InstallFailed', message: error?.message || String(error) };
+  }
+});
+
+// ── Meteor Client: Copiar JAR a mods + crear perfil ──
+ipcMain.handle('minecraft:install-meteor', async (_, opts = {}) => {
+  const minecraftRoot = getMinecraftRoot();
+  const installId = makeInstallId();
+  const profileKey = opts?.profileKey || 'default';
+  const javaPath = opts?.javaPath || '';
+  const localName = (opts?.localName || '').trim() || 'Steve';
+
+  console.log('[INSTALL-METEOR] Starting | localName:', localName);
+
+  try {
+    // ── PASO 1: Encontrar versión fabric existente ──
+    const installedVersions = await readInstalledVersions();
+    const fabricEntry = installedVersions.find(v => v?.type === 'fabric' && v?.mcVer === '26.2');
+    const fabricVersionId = fabricEntry?.id || null;
+    console.log('[INSTALL-METEOR] Found fabric version:', fabricVersionId);
+
+    if (!fabricVersionId) {
+      throw new Error('Fabric no está instalado. Instala Fabric primero.');
+    }
+
+    // ── PASO 2: Copiar meteor-client.jar a mods/ ──
+    console.log('[INSTALL-METEOR] Copying meteor-client.jar to mods/...');
+    const modDestPath = await copyMeteorModToMods(minecraftRoot);
+    console.log('[INSTALL-METEOR] Copied to', modDestPath);
+
+    // ── PASO 3: Crear perfil en launcherState ──
+    const currentState = await loadLauncherState(app.getPath('userData'));
+    const newProfile = {
+      id: `meteor-26.2`,
+      name: METEOR_PROFILE_NAME,
+      localName: localName,
+      version: `fabric-loader-0.19.5-26.2`,
+      inheritsFrom: fabricVersionId,
+      ram: 8,
+      jvmArguments: '',
+      javaPath,
+      active: false,
+    };
+
+    const existingProfiles = currentState.profiles || [];
+    const profileExists = existingProfiles.find(p => p.id === newProfile.id);
+    const updatedProfiles = profileExists
+      ? existingProfiles.map(p => p.id === newProfile.id ? newProfile : p)
+      : [...existingProfiles, newProfile];
+
+    await saveLauncherState(app.getPath('userData'), {
+      ...currentState,
+      profiles: updatedProfiles,
+    });
+    console.log('[INSTALL-METEOR] Profile created with inheritsFrom:', fabricVersionId);
+
+    sendUpdateEvent('minecraft:install-complete', {
+      installId, type: 'meteor',
+      version: METEOR_PROFILE_NAME,
+      path: fabricVersionId,
+      modPath: modDestPath
+    });
+    console.log('[INSTALL-METEOR] COMPLETE!');
+
+    return { ok: true, installId, profileId: newProfile.id, modPath: modDestPath };
+
+  } catch (error) {
+    const errorMsg = error?.message || String(error);
+    console.error('[INSTALL-METEOR] ERROR:', errorMsg);
+    sendUpdateEvent('minecraft:install-error', {
+      type: 'meteor',
+      version: '26.2',
+      message: errorMsg
+    });
+    return { error: 'MeteorInstallFailed', message: errorMsg };
   }
 });
 

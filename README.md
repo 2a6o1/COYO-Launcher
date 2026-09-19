@@ -26,6 +26,7 @@ The new Electron-based version represents a complete rewrite with improved perfo
 - **Microsoft Account Login**: Supports logging in with an official Microsoft account.
 - **Modern Interface**: Built with React and Electron for a modern and customizable look.
 - **Minecraft Compatibility**: Manages Minecraft versions using custom implementation.
+- **Meteor Client 26.2**: One-click install for Meteor Client with Fabric 0.19.5 on Minecraft 26.2.
 - **Open Source**: Easily extendable and modifiable by the community.
 - **Multiplatform**: Available for Windows and Linux operating systems.
 - **Multilanguage Support**: Supports multiple languages for a better user experience.
@@ -123,17 +124,35 @@ The new Electron-based version represents a complete rewrite with improved perfo
 - Linux Portable (Arch/Fedora/Other): `OpenLauncher-Portable-Linux.tar.gz`
 
 
+## 🧪 Meteor Client 26.2 — Instalación Rápida
+
+COYO Launcher incluye soporte integrado para **Meteor Client 26.2** con Fabric 0.19.5. Para instalarlo:
+
+1. Abre el launcher y asegúrate de tener un perfil con un nombre de jugador.
+2. En la sección de acciones rápidas, haz clic en **"Instalar Fabric + Meteor"**.
+3. El launcher instalará Fabric 0.19.5 sobre Minecraft 26.2, copiará el cliente Meteor a la carpeta `mods/` y creará un perfil dedicado.
+4. Una vez completado, selecciona el perfil **"Meteor Client"** y juega.
+
+> **Nota**: También puedes instalar Fabric por separado usando el botón **"Instalar Fabric"**, y luego agregar Meteor manualmente desde la pantalla de mods.
+
 ## 🕹️ Usage
 
 The main interface shows different sections:
 You can create, edit, and switch between multiple profiles.
 Each profile can be either a local profile or linked to a Microsoft account, and it stores its own configuration.
 
-<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/4f064197-0321-4b19-9f5d-e18ba4f86796" />
+<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/4f064197-0321-4b19-9f5d-e18ba4f86796.svg" />
 
-To install a version, use the following interface where you select the version and click install:
+To install a vanilla Minecraft version, use the install section where you select the version and click install:
 
-<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/682c078a-fa88-4f55-9e6c-3834af273b11" />
+<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/682c078a-fa88-4f55-9e6c-3834af273b11.svg" />
+
+For modded Minecraft, use the action buttons:
+- **Instalar Fabric** — installs Fabric Loader on the selected Minecraft version.
+- **Instalar Fabric + Meteor** — installs Fabric 0.19.5 on MC 26.2 and adds Meteor Client to `mods/` automatically.
+- **Instalar Forge** — installs Forge on the selected Minecraft version.
+
+<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/b7d06554-4d3c-494f-8440-3bed928fe2f6.svg" />
 
 By default the following JVM arguments are used:
 
@@ -143,7 +162,7 @@ By default the following JVM arguments are used:
 
 You can view the most recent news and articles from the official Minecraft website:
 
-<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/3a22625d-3ff4-4682-b898-713ea15e5981" />
+<img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/3a22625d-3ff4-4682-b898-713ea15e5981.svg" />
 
 If you want to change something you need to do it from the settings window.
 
@@ -208,8 +227,9 @@ My PC Specs:
 Tested Minecraft Version:
 - Launcher version: Release 1.0.0
 - RAM Allocated: 8GB
-- Minecraft Version: 1.21.11
-- Fabric: 0.18.4
+- Minecraft Version: 26.2
+- Fabric: 0.19.5
+- Meteor Client: 26.2
 - Shaders: [MakeUp-UltraFast-9.1b](https://modrinth.com/shader/makeup-ultra-fast-shaders)
 
 <img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/8247ecfc-2acc-4f55-a2ab-2ff21801d36c" />

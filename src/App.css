@@ -3815,6 +3815,26 @@ button svg {
   cursor: wait;
 }
 
+.beginner-play-btn--meteor {
+  background: linear-gradient(135deg, #7c3aed, #a78bfa) !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 8px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.beginner-play-btn--meteor:hover:not(:disabled) {
+  background: linear-gradient(135deg, #6d28d9, #8b5cf6) !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.4);
+}
+
+.beginner-play-btn--meteor:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .beginner-installing-spinner {
   display: inline-block;
   margin-right: 8px;

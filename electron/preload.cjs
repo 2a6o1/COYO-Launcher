@@ -100,4 +100,7 @@ contextBridge.exposeInMainWorld('launcher', {
     ipcRenderer.on(channel, cb);
     return () => ipcRenderer.removeListener(channel, cb);
   },
+  minecraftInstallMeteor(options) {
+    return ipcRenderer.invoke('minecraft:install-meteor', options);
+  },
 });

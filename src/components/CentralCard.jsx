@@ -50,9 +50,9 @@ export default function CentralCard({
   const isVersionInstalled = (mcVer) => installedMcVers.has(mcVer);
 
   // Versions available to install (not yet installed)
-  const uninstalledVersions = vanillaVersions.filter(
-    (v) => v && !isVersionInstalled(v.mcVer),
-  );
+  const uninstalledVersions = [
+    ...vanillaVersions.filter((v) => v && !isVersionInstalled(v.mcVer)),
+  ];
 
   return (
     <div className="beginner-card">

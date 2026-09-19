@@ -43,7 +43,6 @@ function truncateText(value, maxLength) {
 const APP_SOURCE_URL = "https://github.com/CesarGarza55/OpenLauncher";
 const APP_RELEASES_URL =
   "https://github.com/CesarGarza55/OpenLauncher/releases/latest";
-
 // ── IPC helper (safe for browser dev mode) ──────────────────────────────────
 const launcher = window?.launcher ?? {
   minecraftGetCatalog: () => Promise.resolve(null),
@@ -1290,9 +1289,7 @@ export default function App() {
       "minecraft:install-complete",
       (r) => {
         addLog("success", `Installed ${r.type} ${r.version} -> ${r.path}`);
-        setProgress(0);
         setInstallId(null);
-        setBeginnerIsInstalling(false);
         launcher
           .minecraftGetInstalledVersions?.()
           .then((versions) => {
@@ -1962,6 +1959,115 @@ export default function App() {
       }
     } catch (err) {
       addLog("error", `Install failed: ${err?.message || err}`);
+    }
+  };
+
+  // ── Meteor Client Install (Fabric + Meteor JAR) ───────
+  const handleInstallMeteor = async () => {
+    console.log("[handleInstallMeteor] clicked, beginnerIsInstalling:", beginnerIsInstalling, "javaInstalling:", javaInstalling);
+    if (beginnerIsInstalling || javaInstalling) return;
+
+    setBeginnerMode(false);
+    setBeginnerIsInstalling(true);
+    setProgress(0);
+    setInstallId(null);
+    setActiveTab("console");
+    clearConsole();
+    addLog("info", "🚀 Instalando Meteor Client 26.2 (Fabric + Meteor)...");
+
+    try {
+      // ── PASO 1: Instalar Fabric con el flujo existente ──
+      addLog("info", "⏳ Instalando Fabric 0.19.5 en MC 26.2...");
+
+      // Escuchar el evento de completion del fabric antes de invocar minecraftInstallMeteor
+      let fabricCompleted = false;
+      const offFabricComplete = launcher.on?.("minecraft:install-complete", (r) => {
+        if (r?.type === 'fabric') {
+          fabricCompleted = true;
+          addLog("success", "✅ Fabric 0.19.5 instalado correctamente.");
+        }
+      });
+
+      const fabricResult = await launcher.minecraftInstall?.({
+        type: 'fabric',
+        gameVersion: '26.2',
+        loaderVersion: '0.19.5',
+      });
+
+      // Esperar brevemente a que el perfil fabric se registre en launcherState
+      await new Promise(r => setTimeout(r, 500));
+
+      if (fabricResult?.error) {
+        addLog("error", `❌ Error al instalar Fabric: ${fabricResult.message}`);
+        offFabricComplete?.();
+        setBeginnerIsInstalling(false);
+        return;
+      }
+      if (!fabricCompleted) {
+        addLog("info", "✅ Fabric instalado (verificado por retorno exitoso).");
+      }
+      offFabricComplete?.();
+
+      // ── PASO 2: Copiar meteor-client.jar a mods/ y crear perfil ──
+      addLog("info", "📦 Copiando Meteor Client a mods/ y creando perfil...");
+      setProgress(0);
+
+      const handleProgress = (p) => {
+        if (!p) return;
+        if (typeof p.percent === "number") setProgress(p.percent);
+        if (p.message) addLog("info", p.message);
+      };
+      const handleComplete = (r) => {
+        if (r?.type !== 'meteor') return;
+        addLog("success", `✅ ${r.version} instalado correctamente.`);
+        setProgress(100);
+        setBeginnerIsInstalling(false);
+        setActiveProfileId('meteor-26.2');
+        pushToast({
+          tone: "success",
+          title: "Meteor Client",
+          message: "Meteor Client 26.2 instalado. Aparece en tus perfiles.",
+        });
+        launcher.minecraftGetInstalledVersions?.().then((versions) => {
+          if (Array.isArray(versions)) setInstalledVersions(versions);
+        });
+      };
+      const handleError = (e) => {
+        addLog("error", `❌ Error: ${e?.message || 'Desconocido'}`);
+        setBeginnerIsInstalling(false);
+      };
+
+      const offProgress = launcher.on?.("minecraft:install-progress", handleProgress);
+      const offComplete = launcher.on?.("minecraft:install-complete", handleComplete);
+      const offError = launcher.on?.("minecraft:install-error", handleError);
+
+      const result = await launcher.minecraftInstallMeteor?.({
+        profileKey: String(activeProfileId ?? 'default'),
+        javaPath: settings.javaPath,
+        localName: beginnerLocalName.trim(),
+      });
+
+      if (!result) {
+        addLog("error", "❌ El instalador no respondió.");
+        return;
+      }
+
+      if (result?.error) {
+        addLog("error", `❌ Error de instalación: ${result.message}`);
+        pushToast({
+          tone: "error",
+          title: "Meteor Client",
+          message: result.message,
+        });
+      }
+
+      offProgress?.();
+      offComplete?.();
+      offError?.();
+    } catch (err) {
+      addLog("error", `Falló la instalación de Meteor: ${err?.message || err}`);
+    } finally {
+      setBeginnerIsInstalling(false);
     }
   };
 
@@ -3088,6 +3194,16 @@ export default function App() {
                   <Icon d={ICONS.download} size={13} />
                 </span>
                 {t("install.fabric")}
+              </button>
+              <button
+                className="action-btn"
+                onClick={handleInstallMeteor}
+                disabled={gameState === "running" || beginnerIsInstalling}
+              >
+                <span className="btn-icon">
+                  <Icon d={ICONS.download} size={13} />
+                </span>
+                Instalar Fabric + Meteor
               </button>
               <button
                 className="action-btn"

@@ -61,4 +61,7 @@ contextBridge.exposeInMainWorld('launcher', {
   minecraftDeleteMod(modId) {
     return ipcRenderer.invoke('minecraft:delete-mod', { modId });
   },
+  minecraftInstallMeteor(options) {
+    return ipcRenderer.invoke('minecraft:install-meteor', options);
+  },
 });

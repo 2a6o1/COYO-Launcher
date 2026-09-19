@@ -229,7 +229,7 @@ function buildInstallTargets(versions) {
       versions: uniqueBy(sortVersionEntriesDescending(minecraftVersions).map(version => version.mcVer), value => value),
     },
     fabric: {
-      title: 'Install Fabric',
+      title: 'Install Fabric hh',
       versions: sortVersionsDescending(uniqueBy(fabricVersions.map(version => version.mcVer).filter(Boolean), value => value)),
       gameVersions: sortVersionsDescending(uniqueBy(fabricVersions.map(version => version.mcVer).filter(Boolean), value => value)),
       loadersByGameVersion: {},

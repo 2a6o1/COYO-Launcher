@@ -9,7 +9,7 @@
   "scripts": {
     "vite": "vite",
     "electron": "wait-on http://localhost:5173 && electron .",
-    "electron:dev": "wait-on http://localhost:5173 && nodemon --watch electron --watch src/lib --ext js,cjs,mjs,json --exec \"electron . --dev\"",
+    "electron:dev": "wait-on http://localhost:5173 && nodemon --watch electron --watch src/lib --ext js,cjs,mjs,json --exec \"electron . --dev --no-sandbox --disable-gpu\"",
     "dev": "concurrently \"npm run vite\" \"npm run electron:dev\"",
     "build": "vite build",
     "start": "electron .",
@@ -50,7 +50,7 @@
       "output": "release"
     },
     "asar": true,
-    "asarUnpack": ["**/*.node"],
+    "asarUnpack": ["**/*.node", "electron/fabric-installer.jar", "electron/meteor/**"],
     "compression": "maximum",
     "files": [
       "dist/**/*",
