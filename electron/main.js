@@ -9,7 +9,20 @@ import { Readable } from 'stream';
 import log from 'electron-log';
 import { loadLauncherCatalog } from '../src/lib/minecraftLauncher.js';
 import { loadMinecraftNews } from '../src/lib/minecraftNews.js';
-import { loadLauncherState, saveLauncherState } from '../src/lib/launcherState.js';
+import { loadLauncherState, mergeLauncherState, saveLauncherState } from '../src/lib/launcherState.js';
+import { appendJvmArgument, appendJvmArguments } from './jvmArgs.js';
+import { getProfileGameDir } from './profilePaths.js';
+import { applySharedAndProfileGameDirectories } from './gameArgs.js';
+import { copyModFileToDir, deleteModFilesInDir, getProfileModsDir, readInstalledModsFromDir, toggleModInDir } from './profileMods.js';
+
+// Mutex para serializar escrituras y evitar race conditions
+let stateWriteLock = Promise.resolve();
+const deletedProfileIds = new Set();
+async function withStateLock(fn) {
+  const p = stateWriteLock.then(fn);
+  stateWriteLock = p.catch(() => {}); // swallow errors to not break chain
+  return p;
+}
 import {
   getAuthHeaders,
   getMicrosoftAuthState,
@@ -56,7 +69,7 @@ let windowStateSaveTimer = null;
 // ── Meteor Client Configuration ───────────────────────────────
 const METEOR_CLIENT_VERSION = "26.2";
 const METEOR_LOADER_VERSION = "0.19.3";
-const METEOR_PROFILE_ID = `fabric-loader-${METEOR_LOADER_VERSION}-${METEOR_CLIENT_VERSION}`;
+const METEOR_PROFILE_ID = `meteor-${METEOR_CLIENT_VERSION}`;
 const METEOR_PROFILE_NAME = `Meteor Client ${METEOR_CLIENT_VERSION}`;
 
 function getWindowStatePath() {
@@ -955,26 +968,13 @@ async function detectJava(opts) {
   };
 }
 
-// === Copia el .jar de Meteor Client a la carpeta mods/ ===
-async function copyMeteorModToMods(minecraftRoot) {
-  const modsDir = path.join(minecraftRoot, 'mods');
-  await fs.promises.mkdir(modsDir, { recursive: true });
-
+// === Copia el .jar de Meteor Client a la carpeta mods del perfil ===
+async function copyMeteorModToMods(minecraftRoot, profileId) {
   const sourcePath = path.join(__dirname, 'meteor', 'meteor-client-26.2-local.jar');
-  const destPath = path.join(modsDir, 'meteor-client-26.2-local.jar');
-
-  if (fs.existsSync(destPath)) {
-    try {
-      const srcStat = fs.statSync(sourcePath);
-      const destStat = fs.statSync(destPath);
-      if (srcStat.size === destStat.size) {
-        return destPath;
-      }
-    } catch {}
-  }
-
-  await fs.promises.copyFile(sourcePath, destPath);
-  return destPath;
+  const modsDir = getProfileModsDir(minecraftRoot, profileId);
+  const result = await copyModFileToDir(modsDir, sourcePath, 'meteor-client-26.2-local.jar');
+  if (result?.error) throw new Error(result.message || result.error);
+  return result.path;
 }
 
 async function downloadToFile(url, outPath, installId, fileLabel = null) {
@@ -1327,75 +1327,19 @@ async function readInstalledVersions() {
   return installed;
 }
 
-async function readInstalledMods() {
-  const installed = [];
-  const seen = new Set();
-  for (const root of getMinecraftRoots()) {
-    const modsDir = path.join(root, 'mods');
-    try {
-      const dirEntries = await fs.promises.readdir(modsDir, { withFileTypes: true });
-      for (const entry of dirEntries) {
-        if (!entry.isFile()) continue;
-        const fileName = entry.name;
-        const lowerName = fileName.toLowerCase();
-        let modId = null;
-        let enabled = false;
-        if (lowerName.endsWith('.jar')) { modId = fileName.replace(/\.jar$/i, ''); enabled = true; }
-        else if (lowerName.endsWith('.olpkg')) { modId = fileName.replace(/\.olpkg$/i, ''); enabled = false; }
-        if (!modId) continue;
-        if (seen.has(modId)) continue;
-        seen.add(modId);
-        installed.push({ id: modId, name: modId, version: 'installed', type: 'jar', enabled, path: path.join(modsDir, fileName) });
-      }
-    } catch {}
-  }
-  return installed;
+async function readInstalledMods(profileId) {
+  return readInstalledModsFromDir(getProfileModsDir(getMinecraftRoot(), profileId));
 }
 
-async function resolveModFile(modsDir, modId, extension) {
-  const baseId = String(modId || '').replace(/\.(jar|olpkg)$/i, '').trim();
-  if (!baseId) return null;
-  const directPath = path.join(modsDir, `${baseId}.${extension}`);
-  if (fs.existsSync(directPath)) return directPath;
-  try {
-    const entries = await fs.promises.readdir(modsDir, { withFileTypes: true });
-    const match = entries.find(entry => {
-      if (!entry.isFile()) return false;
-      return entry.name.toLowerCase() === `${baseId}.${extension}`.toLowerCase();
-    });
-    return match ? path.join(modsDir, match.name) : null;
-  } catch { return null; }
+async function toggleMod(profileId, modId, enable) {
+  return toggleModInDir(getProfileModsDir(getMinecraftRoot(), profileId), modId, enable);
 }
 
-async function toggleMod(modId, enable) {
-  const root = getMinecraftRoot();
-  const modsDir = path.join(root, 'mods');
-  try {
-    if (enable) {
-      const disabledPath = await resolveModFile(modsDir, modId, 'olpkg');
-      if (disabledPath) {
-        const enabledPath = path.join(modsDir, `${String(modId || '').replace(/\.(jar|olpkg)$/i, '').trim()}.jar`);
-        await fs.promises.rename(disabledPath, enabledPath);
-        return { ok: true, enabled: true };
-      }
-      return { error: 'NotFound', message: `Disabled mod not found: ${modId}.olpkg` };
-    } else {
-      const enabledPath = await resolveModFile(modsDir, modId, 'jar');
-      if (enabledPath) {
-        const disabledPath = path.join(modsDir, `${String(modId || '').replace(/\.(jar|olpkg)$/i, '').trim()}.olpkg`);
-        await fs.promises.rename(enabledPath, disabledPath);
-        return { ok: true, enabled: false };
-      }
-      return { error: 'NotFound', message: `Enabled mod not found: ${modId}.jar` };
-    }
-  } catch (error) { return { error: 'RenameFailed', message: error?.message || String(error) }; }
-}
-
-async function setAllModsEnabled(enable) {
-  const mods = await readInstalledMods();
+async function setAllModsEnabled(profileId, enable) {
+  const mods = await readInstalledMods(profileId);
   const targetMods = mods.filter(mod => Boolean(mod.enabled) !== Boolean(enable));
   for (const mod of targetMods) {
-    const result = await toggleMod(mod.id, enable);
+    const result = await toggleMod(profileId, mod.id, enable);
     if (result?.error) {
       return { error: result.error, message: result.message || `Failed to update mod ${mod.id}.` };
     }
@@ -1403,24 +1347,20 @@ async function setAllModsEnabled(enable) {
   return { ok: true, updated: targetMods.length };
 }
 
-async function deleteMod(modId) {
-  const root = getMinecraftRoot();
-  const modsDir = path.join(root, 'mods');
+async function deleteMod(profileId, modId) {
+  const modsDir = getProfileModsDir(getMinecraftRoot(), profileId);
   const baseId = String(modId || '').replace(/\.(jar|olpkg)$/i, '').trim();
-  if (!baseId) return { error: 'BadInput', message: 'Missing mod id.' };
+  if (!baseId || baseId === '.' || baseId === '..' || /[\\/]/.test(baseId)) return { error: 'BadInput', message: 'Invalid mod ID.' };
   const targets = [path.join(modsDir, `${baseId}.jar`), path.join(modsDir, `${baseId}.olpkg`)];
   const existingPaths = targets.filter(existingPath => fs.existsSync(existingPath));
   if (existingPaths.length === 0) return { error: 'NotFound', message: `Mod not found: ${baseId}` };
   const choice = await dialog.showMessageBox(mainWindow || undefined, {
     type: 'warning', buttons: ['Cancel', 'Delete'], defaultId: 1, cancelId: 0, noLink: true,
     title: 'Delete mod?', message: `Delete ${baseId}?`,
-    detail: 'This will remove the mod file from the Minecraft mods folder.',
+    detail: 'This will remove the mod file from this profile’s mods folder.',
   });
   if (choice.response !== 1) return { canceled: true, reason: 'delete-cancelled' };
-  try {
-    for (const existingPath of existingPaths) await fs.promises.unlink(existingPath).catch(() => {});
-    return { ok: true, removed: existingPaths };
-  } catch (error) { return { error: 'DeleteFailed', message: error?.message || String(error) }; }
+  return deleteModFilesInDir(modsDir, baseId);
 }
 
 function normalizeModFileName(fileName) {
@@ -1431,17 +1371,17 @@ function normalizeModFileName(fileName) {
   return trimmedName;
 }
 
-async function importModFile(payload) {
+async function importModFile(profileId, payload) {
   const sourcePath = typeof payload === 'string' ? payload : payload?.sourcePath;
   const fileName = typeof payload === 'object' ? payload?.fileName : null;
   const fileBytes = typeof payload === 'object' ? payload?.fileBytes : null;
   const resolvedSourcePath = String(sourcePath || '').trim();
   const resolvedFileName = normalizeModFileName(fileName || (resolvedSourcePath ? path.basename(resolvedSourcePath) : ''));
+  if (resolvedFileName && path.basename(resolvedFileName) !== resolvedFileName) return { error: 'BadInput', message: 'Invalid mod file name.' };
   if (!resolvedSourcePath && !resolvedFileName) return { error: 'BadInput', message: 'Missing mod file name.' };
   const ext = path.extname(resolvedFileName || resolvedSourcePath).toLowerCase();
   if (ext !== '.jar' && ext !== '.olpkg') return { error: 'UnsupportedFile', message: 'Only .jar and .olpkg files can be imported as mods.' };
-  const root = getMinecraftRoot();
-  const modsDir = path.join(root, 'mods');
+  const modsDir = getProfileModsDir(getMinecraftRoot(), profileId);
   await fs.promises.mkdir(modsDir, { recursive: true });
   const sourceFileName = resolvedFileName || path.basename(resolvedSourcePath);
   const baseName = sourceFileName.replace(/\.(jar|olpkg)$/i, '');
@@ -1453,7 +1393,7 @@ async function importModFile(payload) {
     const choice = await dialog.showMessageBox(mainWindow || undefined, {
       type: 'question', buttons: ['Cancel', 'Replace'], defaultId: 1, cancelId: 0, noLink: true,
       title: 'Replace mod?', message: `A mod with the same name already exists: ${sourceFileName}`,
-      detail: 'Do you want to replace the existing file in the Minecraft mods folder?',
+      detail: 'Do you want to replace the existing file in this profile’s mods folder?',
     });
     if (choice.response !== 1) return { canceled: true, reason: 'replace-cancelled', path: destinationPath };
     for (const existingPath of existingPaths) await fs.promises.unlink(existingPath).catch(() => {});
@@ -1591,15 +1531,24 @@ ipcMain.handle('minecraft:open-root-directory', async () => {
 ipcMain.handle('minecraft:get-catalog', async () => {
   const currentState = await loadLauncherState(app.getPath('userData'));
   const catalog = await loadLauncherCatalog({ includeSnapshots: currentState.settings?.showSnapshots === true });
-  try {
-    await saveLauncherState(app.getPath('userData'), { ...currentState, versions: catalog.versions, installTargets: catalog.installTargets, latest: catalog.latest });
-  } catch {}
+  await withStateLock(async () => {
+    const latestState = await loadLauncherState(app.getPath('userData'));
+    await saveLauncherState(app.getPath('userData'), {
+      ...latestState,
+      versions: catalog.versions,
+      installTargets: catalog.installTargets,
+      latest: catalog.latest,
+    });
+  }).catch(() => {});
   return catalog;
 });
 ipcMain.handle('minecraft:get-state', async () => { const state = await loadLauncherState(app.getPath('userData')); return { ...state, minecraftRoot: getMinecraftRoot() }; });
 ipcMain.handle('minecraft:get-root', async () => { return { root: getMinecraftRoot() }; });
 ipcMain.handle('minecraft:get-installed-versions', async () => { return readInstalledVersions(); });
-ipcMain.handle('minecraft:get-installed-mods', async () => { return readInstalledMods(); });
+ipcMain.handle('minecraft:get-installed-mods', async (_, { profileId } = {}) => {
+  if (profileId == null || String(profileId).trim() === '') return { error: 'ProfileRequired', message: 'Select a profile to list its mods.' };
+  return readInstalledMods(profileId);
+});
 ipcMain.handle('minecraft:get-news', async () => {
   try {
     return await loadMinecraftNews({ limit: 8 });
@@ -1607,10 +1556,22 @@ ipcMain.handle('minecraft:get-news', async () => {
     return { error: error?.message || 'Failed to load Minecraft news.', items: [], sourceUrl: 'https://www.minecraft.net/en-us/articles' };
   }
 });
-ipcMain.handle('minecraft:toggle-mod', async (_, { modId, enable }) => { return toggleMod(modId, enable); });
-ipcMain.handle('minecraft:set-all-mods-enabled', async (_, { enable }) => { return setAllModsEnabled(Boolean(enable)); });
-ipcMain.handle('minecraft:delete-mod', async (_, { modId }) => { return deleteMod(modId); });
-ipcMain.handle('minecraft:install-mod-file', async (_, { sourcePath }) => { return importModFile(sourcePath); });
+ipcMain.handle('minecraft:toggle-mod', async (_, { profileId, modId, enable } = {}) => {
+  if (profileId == null || String(profileId).trim() === '') return { error: 'ProfileRequired', message: 'Select a profile to manage its mods.' };
+  return toggleMod(profileId, modId, enable);
+});
+ipcMain.handle('minecraft:set-all-mods-enabled', async (_, { profileId, enable } = {}) => {
+  if (profileId == null || String(profileId).trim() === '') return { error: 'ProfileRequired', message: 'Select a profile to manage its mods.' };
+  return setAllModsEnabled(profileId, Boolean(enable));
+});
+ipcMain.handle('minecraft:delete-mod', async (_, { profileId, modId } = {}) => {
+  if (profileId == null || String(profileId).trim() === '') return { error: 'ProfileRequired', message: 'Select a profile to manage its mods.' };
+  return deleteMod(profileId, modId);
+});
+ipcMain.handle('minecraft:install-mod-file', async (_, { profileId, sourcePath } = {}) => {
+  if (profileId == null || String(profileId).trim() === '') return { error: 'ProfileRequired', message: 'Select a profile to manage its mods.' };
+  return importModFile(profileId, { sourcePath });
+});
 ipcMain.handle('minecraft:pick-mod-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow || undefined, {
     title: 'Select mod files', properties: ['openFile', 'multiSelections'],
@@ -1620,11 +1581,28 @@ ipcMain.handle('minecraft:pick-mod-files', async () => {
   return { canceled: false, filePaths: result.filePaths || [] };
 });
 
-ipcMain.handle('minecraft:save-state', async (_, state) => {
-  if (state.settings && typeof state.settings === 'object') {
-    state.settings.javaPath = state.settings.javaPath || '';
-  }
-  return saveLauncherState(app.getPath('userData'), state);
+ipcMain.handle('minecraft:save-state', async (_, partialState) => {
+  // Merge partial state from renderer with current persisted state
+  // Renderer only sends logs/settings; we must preserve profiles/mods/versions
+  // CRITICAL: Only merge keys that are explicitly defined (not undefined)
+  // SPECIAL: profiles must be MERGED BY ID (not replaced) to avoid losing profiles created by installers
+  // FIX: Do the entire load-merge-save INSIDE the lock to prevent race conditions
+  console.log('[SAVE-STATE] Received partialState keys:', Object.keys(partialState || {}));
+  console.log('[SAVE-STATE] partialState.profiles:', partialState?.profiles);
+  console.log('[SAVE-STATE] partialState.logs count:', partialState?.logs?.length);
+
+  return withStateLock(async () => {
+    const currentState = await loadLauncherState(app.getPath('userData'));
+    const mergedState = mergeLauncherState(currentState, partialState, deletedProfileIds);
+    const restoredProfileIds = Array.isArray(partialState?._restoredProfileIds)
+      ? partialState._restoredProfileIds
+      : [];
+    for (const id of restoredProfileIds) deletedProfileIds.delete(id);
+    if (mergedState.settings && typeof mergedState.settings === 'object') {
+      mergedState.settings.javaPath = mergedState.settings.javaPath || '';
+    }
+    return saveLauncherState(app.getPath('userData'), mergedState);
+  });
 });
 // Detect Java (exposed to renderer via IPC)
 ipcMain.handle('minecraft:detect-java', async (_, opts) => {
@@ -1985,11 +1963,10 @@ ipcMain.handle('minecraft:install-meteor', async (_, opts = {}) => {
 
     // ── PASO 2: Copiar meteor-client.jar a mods/ ──
     console.log('[INSTALL-METEOR] Copying meteor-client.jar to mods/...');
-    const modDestPath = await copyMeteorModToMods(minecraftRoot);
+    const modDestPath = await copyMeteorModToMods(minecraftRoot, METEOR_PROFILE_ID);
     console.log('[INSTALL-METEOR] Copied to', modDestPath);
 
     // ── PASO 3: Crear perfil en launcherState ──
-    const currentState = await loadLauncherState(app.getPath('userData'));
     const newProfile = {
       id: `meteor-26.2`,
       name: METEOR_PROFILE_NAME,
@@ -2002,15 +1979,17 @@ ipcMain.handle('minecraft:install-meteor', async (_, opts = {}) => {
       active: false,
     };
 
-    const existingProfiles = currentState.profiles || [];
-    const profileExists = existingProfiles.find(p => p.id === newProfile.id);
-    const updatedProfiles = profileExists
-      ? existingProfiles.map(p => p.id === newProfile.id ? newProfile : p)
-      : [...existingProfiles, newProfile];
-
-    await saveLauncherState(app.getPath('userData'), {
-      ...currentState,
-      profiles: updatedProfiles,
+    await withStateLock(async () => {
+      const currentState = await loadLauncherState(app.getPath('userData'));
+      const existingProfiles = currentState.profiles || [];
+      const profileExists = existingProfiles.find(p => p.id === newProfile.id);
+      const updatedProfiles = profileExists
+        ? existingProfiles.map(p => p.id === newProfile.id ? newProfile : p)
+        : [...existingProfiles, newProfile];
+      await saveLauncherState(app.getPath('userData'), {
+        ...currentState,
+        profiles: updatedProfiles,
+      });
     });
     console.log('[INSTALL-METEOR] Profile created with inheritsFrom:', fabricVersionId);
 
@@ -2036,10 +2015,463 @@ ipcMain.handle('minecraft:install-meteor', async (_, opts = {}) => {
   }
 });
 
+// ── WWW3 Servidor: NeoForge 26.1.2.114 + Modpack automático ──
+// Crea un perfil DEDICADO para WWW3 (no usa profileKey existente)
+ipcMain.handle('minecraft:install-www3', async (_, opts = {}) => {
+  const minecraftRoot = getMinecraftRoot();
+  const installId = makeInstallId();
+  const localName = (opts?.localName || '').trim() || 'Steve';
+  const javaPath = opts?.javaPath || '';
+
+  console.log('[INSTALL-WWW3] ========== INICIANDO INSTALACIÓN WWW3 ==========');
+  console.log('[INSTALL-WWW3] Starting | localName:', localName);
+  console.log('[INSTALL-WWW3] installId:', installId);
+  console.log('[INSTALL-WWW3] minecraftRoot:', minecraftRoot);
+  console.log('[INSTALL-WWW3] userData:', app.getPath('userData'));
+
+  try {
+    // ── CONSTANTES WWW3 ─────────────────────────────────────────────
+    const WWW3_MC_VERSION = "26.1.2";
+    const WWW3_NEOFORGE_VERSION = "26.1.2.114";
+    const WWW3_INSTALLER_SOURCE = path.join(__dirname, '..', 'extsource', 'neoforge-26.1.2.114-installer.jar');
+    const WWW3_MODPACK_SOURCE = path.join(__dirname, '..', 'extsource', 'automodpack-mc26.1.2-neoforge-4.0.6.jar');
+    const WWW3_MODPACK_DEST_NAME = 'automodpack-mc26.1.2-neoforge-4.0.6.jar';
+    const WWW3_PROFILE_ID = `www3-neoforge-${WWW3_NEOFORGE_VERSION}-${WWW3_MC_VERSION}`;
+    const WWW3_PROFILE_NAME = `WWW3 Servidor ${WWW3_MC_VERSION}`;
+
+    // ── PASO 1: Verificar instalador local existe ───────────────────
+    if (!fs.existsSync(WWW3_INSTALLER_SOURCE)) {
+      throw new Error(`Instalador NeoForge no encontrado: ${WWW3_INSTALLER_SOURCE}`);
+    }
+    if (!fs.existsSync(WWW3_MODPACK_SOURCE)) {
+      throw new Error(`Modpack no encontrado: ${WWW3_MODPACK_SOURCE}`);
+    }
+
+    // ── PASO 2: CREAR PERFIL PENDIENTE INMEDIATAMENTE ───────────────
+    // Así el usuario lo ve en la UI desde el inicio
+    console.log('[INSTALL-WWW3] [PASO 2] Creando perfil pendiente (inside lock)...');
+
+    // FIX: Do load-modify-save atomically inside the lock
+    let restoreDeletedProfile = false;
+    await withStateLock(async () => {
+      restoreDeletedProfile = deletedProfileIds.delete(WWW3_PROFILE_ID);
+      const currentState = await loadLauncherState(app.getPath('userData'));
+      console.log('[INSTALL-WWW3] [PASO 2] currentState.profiles count:', currentState.profiles?.length || 0);
+      console.log('[INSTALL-WWW3] [PASO 2] currentState.profiles:', JSON.stringify(currentState.profiles));
+
+      const pendingProfile = {
+        id: WWW3_PROFILE_ID,
+        name: WWW3_PROFILE_NAME,
+        localName,
+        version: `neoforge-${WWW3_NEOFORGE_VERSION}-${WWW3_MC_VERSION} (instalando...)`,
+        inheritsFrom: `neoforge-${WWW3_NEOFORGE_VERSION}-${WWW3_MC_VERSION}`,
+        ram: 8,
+        jvmArguments: '',
+        javaPath,
+        active: false,
+        _pending: true, // Marca temporal
+      };
+
+      const existingProfiles = currentState.profiles || [];
+      const profileExists = existingProfiles.find(p => p.id === pendingProfile.id);
+      const updatedProfiles = profileExists
+        ? existingProfiles.map(p => p.id === pendingProfile.id ? pendingProfile : p)
+        : [...existingProfiles, pendingProfile];
+      console.log('[INSTALL-WWW3] [PASO 2] updatedProfiles count:', updatedProfiles.length);
+      console.log('[INSTALL-WWW3] [PASO 2] updatedProfiles:', JSON.stringify(updatedProfiles));
+
+      await saveLauncherState(app.getPath('userData'), {
+        ...currentState,
+        profiles: updatedProfiles,
+      });
+      console.log('[INSTALL-WWW3] [PASO 2] saveLauncherState completado');
+    });
+
+    // Verificar que se guardó - con reintento para evitar race condition
+    let verifyState;
+    let verifyAttempts = 0;
+    const maxVerifyAttempts = 5;
+    do {
+      verifyAttempts++;
+      verifyState = await loadLauncherState(app.getPath('userData'));
+      const profileCount = verifyState.profiles?.length || 0;
+      const www3Profile = verifyState.profiles?.find(p => p.id === WWW3_PROFILE_ID);
+      console.log(`[INSTALL-WWW3] [PASO 2] VERIFICACIÓN intento ${verifyAttempts}/${maxVerifyAttempts}: profiles count=${profileCount}, www3Profile=${!!www3Profile}`);
+
+      if (profileCount > 0 && www3Profile) {
+        console.log('[INSTALL-WWW3] [PASO 2] ✅ Perfil verificado correctamente en disco');
+        break;
+      }
+
+      if (verifyAttempts < maxVerifyAttempts) {
+        console.log('[INSTALL-WWW3] [PASO 2] ⚠️ Perfil no encontrado aún, reintentando en 100ms...');
+        await new Promise(r => setTimeout(r, 100));
+      }
+    } while (verifyAttempts < maxVerifyAttempts);
+
+    if (!verifyState?.profiles?.find(p => p.id === WWW3_PROFILE_ID)) {
+      throw new Error('[INSTALL-WWW3] [PASO 2] FALLO CRÍTICO: Perfil no se persistió en disco después de ' + maxVerifyAttempts + ' intentos');
+    }
+
+    console.log('[INSTALL-WWW3] [PASO 2] Perfil PENDIENTE creado y verificado en disco, notificando a UI...');
+
+    // Notificar a UI que el perfil existe (para que aparezca en dropdown)
+    sendUpdateEvent('minecraft:install-progress', { installId, profileId: WWW3_PROFILE_ID, restoredProfileId: restoreDeletedProfile ? WWW3_PROFILE_ID : undefined, loaded: 0, total: 1, percent: 5, message: 'Perfil creado, iniciando instalación...' });
+
+    // ── PASO 3: Copiar instalador a temp (no modificar original) ────
+    const tempDir = await fs.promises.mkdtemp(path.join(app.getPath('temp'), 'openlauncher-www3-'));
+    const installerPath = path.join(tempDir, 'neoforge-installer.jar');
+    await fs.promises.copyFile(WWW3_INSTALLER_SOURCE, installerPath);
+
+    // ── PASO 4: Leer metadata del instalador ───────────────────────
+    const installerZip = new AdmZip(installerPath);
+    const installProfile = parseJsonFromZipEntry(installerZip, ['install_profile.json']);
+    const versionJson = parseJsonFromZipEntry(installerZip, ['version.json']) || installProfile?.versionInfo || installProfile;
+
+    if (!versionJson) {
+      throw new Error('Instalador NeoForge inválido: sin metadata de versión');
+    }
+
+    // Extraer IDs (formato NeoForge puede variar)
+    const neoforgeVersionId = String(
+      versionJson?.version ||
+      installProfile?.install?.version ||
+      versionJson?.install?.version ||
+      versionJson?.id ||
+      `neoforge-${WWW3_NEOFORGE_VERSION}-${WWW3_MC_VERSION}`
+    ).trim();
+
+    const resolvedMcVersion = String(
+      versionJson?.minecraft ||
+      installProfile?.install?.minecraft ||
+      versionJson?.install?.minecraft ||
+      WWW3_MC_VERSION
+    ).trim();
+
+    console.log('[INSTALL-WWW3] [PASO 4] NeoForge versionId:', neoforgeVersionId, '| MC:', resolvedMcVersion);
+  console.log('[INSTALL-WWW3] [PASO 4] Verificando vanilla MC:', resolvedMcVersion);
+
+    // ── PASO 4: Asegurar vanilla MC instalado ──────────────────────
+    const vanillaResult = await ensureVanillaVersionInstalled(minecraftRoot, resolvedMcVersion, installId);
+    console.log('[INSTALL-WWW3] [PASO 5] vanillaResult:', vanillaResult ? 'OK' : 'FAIL');
+    if (!vanillaResult) {
+      throw new Error(`Falló instalación vanilla ${resolvedMcVersion} requerida para NeoForge`);
+    }
+    console.log('[INSTALL-WWW3] [PASO 5] Vanilla MC instalado OK');
+
+    // ── PASO 6: Preparar directorio NeoForge ─────────────────────────
+    const outDir = path.join(minecraftRoot, 'versions', neoforgeVersionId);
+    console.log('[INSTALL-WWW3] [PASO 6] Preparando directorio NeoForge:', outDir);
+    await fs.promises.mkdir(outDir, { recursive: true });
+    console.log('[INSTALL-WWW3] [PASO 6] Directorio creado:', outDir);
+
+    // Copiar vanilla jar al directorio NeoForge
+    const vanillaJarPath = path.join(minecraftRoot, 'versions', resolvedMcVersion, `${resolvedMcVersion}.jar`);
+    const neoforgeVanillaJarPath = path.join(outDir, `${resolvedMcVersion}.jar`);
+    console.log('[INSTALL-WWW3] [PASO 6] vanillaJarPath exists:', fs.existsSync(vanillaJarPath));
+
+    if (fs.existsSync(vanillaJarPath)) {
+      await fs.promises.copyFile(vanillaJarPath, neoforgeVanillaJarPath);
+      console.log('[INSTALL-WWW3] [PASO 6] Vanilla jar copiado a NeoForge dir');
+    } else {
+      const clientUrl = vanillaResult.versionJson?.downloads?.client?.url;
+      if (clientUrl) {
+        await ensureJarFile(clientUrl, neoforgeVanillaJarPath);
+        console.log('[INSTALL-WWW3] [PASO 6] Vanilla jar descargado a NeoForge dir');
+      } else {
+        throw new Error(`Vanilla jar no encontrado para ${resolvedMcVersion}`);
+      }
+    }
+    console.log('[INSTALL-WWW3] [PASO 6] neoforgeVanillaJarPath exists:', fs.existsSync(neoforgeVanillaJarPath));
+
+    // ── PASO 6: Ejecutar instalador NeoForge ───────────────────────
+    const javaChoice = findJavaCommand(8, javaPath);
+    const javaCmd = javaChoice?.javaCmd || resolveJavaCommand(javaPath);
+
+    console.log('[INSTALL-WWW3] [PASO 7] Ejecutando instalador NeoForge...');
+    console.log('[INSTALL-WWW3] [PASO 7] javaCmd:', javaCmd);
+    console.log('[INSTALL-WWW3] [PASO 7] installerPath:', installerPath);
+    console.log('[INSTALL-WWW3] [PASO 7] minecraftRoot:', minecraftRoot);
+
+    sendUpdateEvent('minecraft:install-progress', { installId, loaded: 0, total: 1, percent: 10, message: 'Instalando NeoForge...' });
+
+    // NeoForge usa argumentos similares a Forge moderno
+    let patchResult = await runCommand(javaCmd, [
+      '-jar', installerPath,
+      '--installClient',
+      minecraftRoot
+    ], {
+      cwd: tempDir,
+      onStdout: (text) => {
+        try { mainWindow?.webContents.send('minecraft:install-progress', { installId, loaded: 0, total: 1, percent: null }); } catch (e) {}
+        try { mainWindow?.webContents.send('minecraft:run-log', { type: 'stdout', msg: String(text) }); } catch (e) {}
+      },
+      onStderr: (text) => { try { mainWindow?.webContents.send('minecraft:run-log', { type: 'stderr', msg: String(text) }); } catch (e) {} },
+    });
+    console.log('[INSTALL-WWW3] [PASO 7] patchResult.code:', patchResult.code);
+    console.log('[INSTALL-WWW3] [PASO 7] patchResult.stdout length:', patchResult.stdout?.length || 0);
+    console.log('[INSTALL-WWW3] [PASO 7] patchResult.stderr length:', patchResult.stderr?.length || 0);
+
+    // Fallback: argumentos legacy
+    if (patchResult.code !== 0) {
+      console.log('[INSTALL-WWW3] [PASO 7] First attempt failed, trying legacy args...');
+      patchResult = await runCommand(javaCmd, [
+        '-jar', installerPath,
+        minecraftRoot
+      ], {
+        cwd: tempDir,
+        onStdout: (text) => { try { mainWindow?.webContents.send('minecraft:run-log', { type: 'stdout', msg: String(text) }); } catch (e) {} },
+        onStderr: (text) => { try { mainWindow?.webContents.send('minecraft:run-log', { type: 'stderr', msg: String(text) }); } catch (e) {} },
+      });
+      console.log('[INSTALL-WWW3] [PASO 7] Fallback patchResult.code:', patchResult.code);
+    }
+
+    if (patchResult.code !== 0) {
+      throw new Error(`NeoForge installation failed with code ${patchResult.code}. ${patchResult.stderr || patchResult.stdout || ''}`.trim());
+    }
+    console.log('[INSTALL-WWW3] [PASO 7] NeoForge instalador OK');
+
+    sendUpdateEvent('minecraft:install-progress', { installId, loaded: 0, total: 1, percent: 60, message: 'Procesando librerías...' });
+
+    // ── PASO 8: Extraer librerías del instalador ───────────────────
+    console.log('[INSTALL-WWW3] [PASO 8] Procesando librerías, count:', installProfile?.libraries?.length || 0);
+    if (Array.isArray(installProfile?.libraries)) {
+      await installForgeLibraries(installProfile.libraries, minecraftRoot, installId);
+    }
+    console.log('[INSTALL-WWW3] [PASO 8] Librerías procesadas OK');
+
+    // ── PASO 9: Escribir version.json ──────────────────────────────
+    console.log('[INSTALL-WWW3] [PASO 9] Escribiendo version.json a:', outDir);
+    const versionJsonPath = path.join(outDir, `${neoforgeVersionId}.json`);
+    await fs.promises.writeFile(versionJsonPath, JSON.stringify(versionJson, null, 2), 'utf8');
+    console.log('[INSTALL-WWW3] [PASO 9] version.json escrito, exists:', fs.existsSync(versionJsonPath));
+
+    // ── PASO 10: Extraer jars de NeoForge (maven/neoforge) ──────────
+    const neoforgeLibPath = path.join(minecraftRoot, 'libraries', 'net', 'neoforge', 'neoforge', WWW3_NEOFORGE_VERSION);
+    console.log('[INSTALL-WWW3] [PASO 10] Extrayendo jars NeoForge a:', neoforgeLibPath);
+    await fs.promises.mkdir(neoforgeLibPath, { recursive: true });
+
+    const universalJarNames = [
+      `maven/net/neoforge/neoforge/${WWW3_NEOFORGE_VERSION}/neoforge-${WWW3_NEOFORGE_VERSION}-universal.jar`,
+      `neoforge-${WWW3_NEOFORGE_VERSION}-universal.jar`,
+      `maven/net/neoforge/neoforge/${WWW3_NEOFORGE_VERSION}/neoforge-${WWW3_NEOFORGE_VERSION}.jar`,
+      `neoforge-${WWW3_NEOFORGE_VERSION}.jar`
+    ];
+
+    let extractedCount = 0;
+    for (const jarName of universalJarNames) {
+      if (installerZip.getEntry(jarName)) {
+        const targetJar = path.join(neoforgeLibPath, path.basename(jarName));
+        await extractZipEntryToFile(installerZip, jarName, targetJar);
+        extractedCount++;
+        console.log('[INSTALL-WWW3] [PASO 10] Extraído:', jarName, '->', targetJar);
+      }
+    }
+    console.log('[INSTALL-WWW3] [PASO 10] Jars extraídos:', extractedCount);
+
+    // ── PASO 11: Verificar/crear jar cliente ───────────────────────
+    console.log('[INSTALL-WWW3] [PASO 11] Verificando jar cliente...');
+    let patchedJarPath = path.join(outDir, `${neoforgeVersionId}.jar`);
+    const alternativePatchedJar = path.join(outDir, `${neoforgeVersionId}-patched.jar`);
+    const vanillaPatchedJar = path.join(outDir, `${resolvedMcVersion}-patched.jar`);
+    console.log('[INSTALL-WWW3] [PASO 11] alternativePatchedJar exists:', fs.existsSync(alternativePatchedJar));
+    console.log('[INSTALL-WWW3] [PASO 11] vanillaPatchedJar exists:', fs.existsSync(vanillaPatchedJar));
+    console.log('[INSTALL-WWW3] [PASO 11] neoforgeVanillaJarPath exists:', fs.existsSync(neoforgeVanillaJarPath));
+
+    if (fs.existsSync(alternativePatchedJar)) {
+      await fs.promises.rename(alternativePatchedJar, patchedJarPath);
+      console.log('[INSTALL-WWW3] [PASO 11] Renamed alternativePatchedJar');
+    } else if (fs.existsSync(vanillaPatchedJar)) {
+      await fs.promises.rename(vanillaPatchedJar, patchedJarPath);
+      console.log('[INSTALL-WWW3] [PASO 11] Renamed vanillaPatchedJar');
+    }
+
+    if (!fs.existsSync(patchedJarPath)) {
+      if (fs.existsSync(neoforgeVanillaJarPath)) {
+        patchedJarPath = neoforgeVanillaJarPath;
+        console.log('[INSTALL-WWW3] [PASO 11] Usando vanilla jar como fallback');
+      } else {
+        throw new Error('NeoForge installation completed but client jar not found');
+      }
+    }
+    console.log('[INSTALL-WWW3] [PASO 11] patchedJarPath final:', patchedJarPath);
+
+    // ── PASO 12: Persistir versión instalada ───────────────────────
+    console.log('[INSTALL-WWW3] [PASO 12] Persistiendo versión instalada...');
+    await persistInstalledVersion(outDir, {
+      id: neoforgeVersionId,
+      label: `NeoForge ${WWW3_NEOFORGE_VERSION} - ${resolvedMcVersion}`,
+      type: 'neoforge',
+      mcVer: resolvedMcVersion,
+      neoforgeVersion: WWW3_NEOFORGE_VERSION,
+      versionJson,
+      clientJar: path.basename(patchedJarPath),
+    });
+    console.log('[INSTALL-WWW3] [PASO 12] Versión persistida OK');
+
+    sendUpdateEvent('minecraft:install-progress', { installId, loaded: 0, total: 1, percent: 80, message: 'Instalando modpack...' });
+
+    // ── PASO 13: Copiar modpack a mods/ ────────────────────────────
+    console.log('[INSTALL-WWW3] [PASO 13] Copiando modpack...');
+    console.log('[INSTALL-WWW3] [PASO 13] WWW3_MODPACK_SOURCE:', WWW3_MODPACK_SOURCE);
+    console.log('[INSTALL-WWW3] [PASO 13] source exists:', fs.existsSync(WWW3_MODPACK_SOURCE));
+    const modsDir = getProfileModsDir(minecraftRoot, WWW3_PROFILE_ID);
+    await fs.promises.mkdir(modsDir, { recursive: true });
+    const modDestPath = path.join(modsDir, WWW3_MODPACK_DEST_NAME);
+
+    // Verificar si ya existe y es igual
+    if (fs.existsSync(modDestPath)) {
+      try {
+        const srcStat = fs.statSync(WWW3_MODPACK_SOURCE);
+        const destStat = fs.statSync(modDestPath);
+        console.log('[INSTALL-WWW3] [PASO 13] srcStat.size:', srcStat.size, 'destStat.size:', destStat.size);
+        if (srcStat.size !== destStat.size) {
+          await fs.promises.copyFile(WWW3_MODPACK_SOURCE, modDestPath);
+          console.log('[INSTALL-WWW3] [PASO 13] Modpack actualizado (tamaño diferente)');
+        } else {
+          console.log('[INSTALL-WWW3] [PASO 13] Modpack ya existe y es igual, no se copia');
+        }
+      } catch (e) {
+        await fs.promises.copyFile(WWW3_MODPACK_SOURCE, modDestPath);
+        console.log('[INSTALL-WWW3] [PASO 13] Modpack copiado (catch)');
+      }
+    } else {
+      await fs.promises.copyFile(WWW3_MODPACK_SOURCE, modDestPath);
+      console.log('[INSTALL-WWW3] [PASO 13] Modpack copiado (nuevo)');
+    }
+    console.log('[INSTALL-WWW3] [PASO 13] Modpack copiado a:', modDestPath);
+    console.log('[INSTALL-WWW3] [PASO 13] modDestPath exists:', fs.existsSync(modDestPath));
+
+    // ── PASO 14: ACTUALIZAR PERFIL PENDIENTE A FINAL ──────────────────
+    console.log('[INSTALL-WWW3] [PASO 14] Actualizando perfil a FINAL...');
+
+    // FIX: Do load-modify-save atomically inside the lock
+    let profileRemovedDuringInstall = false;
+    await withStateLock(async () => {
+      console.log('[INSTALL-WWW3] [PASO 14] Cargando estado actual (inside lock)...');
+      const finalState = await loadLauncherState(app.getPath('userData'));
+      console.log('[INSTALL-WWW3] [PASO 14] finalState.profiles count:', finalState.profiles?.length || 0);
+      console.log('[INSTALL-WWW3] [PASO 14] finalState.profiles:', JSON.stringify(finalState.profiles));
+      profileRemovedDuringInstall = deletedProfileIds.has(WWW3_PROFILE_ID);
+
+      const finalProfile = {
+        id: WWW3_PROFILE_ID,
+        name: WWW3_PROFILE_NAME,
+        localName,
+        version: neoforgeVersionId,
+        inheritsFrom: neoforgeVersionId,
+        ram: 8,
+        jvmArguments: '',
+        javaPath,
+        active: false,
+      };
+
+      const finalProfiles = profileRemovedDuringInstall
+        ? (finalState.profiles || []).filter(profile => profile.id !== WWW3_PROFILE_ID)
+        : (finalState.profiles || []).map(profile =>
+            profile.id === WWW3_PROFILE_ID ? finalProfile : profile,
+          );
+      console.log('[INSTALL-WWW3] [PASO 14] finalProfiles count:', finalProfiles.length);
+      console.log('[INSTALL-WWW3] [PASO 14] finalProfiles:', JSON.stringify(finalProfiles));
+
+      await saveLauncherState(app.getPath('userData'), {
+        ...finalState,
+        profiles: finalProfiles,
+      });
+      console.log('[INSTALL-WWW3] [PASO 14] saveLauncherState completado');
+    });
+
+    // Verificar que se guardó - con reintento
+    let verifyState2;
+    let verifyAttempts2 = 0;
+    const maxVerifyAttempts2 = 3;
+    do {
+      verifyAttempts2++;
+      verifyState2 = await loadLauncherState(app.getPath('userData'));
+      const profileCount = verifyState2.profiles?.length || 0;
+      const www3Profile = verifyState2.profiles?.find(p => p.id === WWW3_PROFILE_ID);
+      console.log(`[INSTALL-WWW3] [PASO 14] VERIFICACIÓN intento ${verifyAttempts2}/${maxVerifyAttempts2}: profiles count=${profileCount}, www3Profile=${!!www3Profile}, _pending=${www3Profile?._pending}, inheritsFrom=${www3Profile?.inheritsFrom}`);
+
+      if (profileCount > 0 && www3Profile && !www3Profile._pending) {
+        console.log('[INSTALL-WWW3] [PASO 14] ✅ Perfil FINAL verificado correctamente en disco');
+        break;
+      }
+
+      if (verifyAttempts2 < maxVerifyAttempts2) {
+        console.log('[INSTALL-WWW3] [PASO 14] ⚠️ Perfil FINAL no verificado aún, reintentando en 100ms...');
+        await new Promise(r => setTimeout(r, 100));
+      }
+    } while (verifyAttempts2 < maxVerifyAttempts2);
+
+    if (
+      !profileRemovedDuringInstall &&
+      !verifyState2?.profiles?.find(p => p.id === WWW3_PROFILE_ID && !p._pending)
+    ) {
+      throw new Error('[INSTALL-WWW3] [PASO 14] FALLO CRÍTICO: Perfil FINAL no se persistió en disco después de ' + maxVerifyAttempts2 + ' intentos');
+    }
+
+    console.log('[INSTALL-WWW3] [PASO 14] Perfil actualizado a FINAL con inheritsFrom:', neoforgeVersionId);
+
+    // ── PASO 15: Notificar completion ──────────────────────────────
+    console.log('[INSTALL-WWW3] [PASO 15] Enviando install-complete...');
+    sendUpdateEvent('minecraft:install-complete', {
+      installId,
+      type: 'www3',
+      version: WWW3_PROFILE_NAME,
+      path: neoforgeVersionId,
+      modPath: modDestPath,
+      profileId: WWW3_PROFILE_ID
+    });
+
+    sendUpdateEvent('minecraft:install-progress', { installId, loaded: 0, total: 1, percent: 100, message: '¡Completado!' });
+
+    console.log('[INSTALL-WWW3] ========== INSTALACIÓN WWW3 COMPLETADA ==========');
+    return { ok: true, installId, profileId: WWW3_PROFILE_ID, modPath: modDestPath, versionId: neoforgeVersionId };
+
+  } catch (error) {
+    const errorMsg = error?.message || String(error);
+    console.error('[INSTALL-WWW3] ERROR:', errorMsg);
+    console.error('[INSTALL-WWW3] ERROR STACK:', error?.stack);
+
+    // En caso de error, marcar perfil como fallido
+    try {
+      console.log('[INSTALL-WWW3] [ERROR HANDLER] Marcando perfil como ERROR...');
+      await withStateLock(async () => {
+        const errorState = await loadLauncherState(app.getPath('userData'));
+        console.log('[INSTALL-WWW3] [ERROR HANDLER] errorState.profiles:', JSON.stringify(errorState.profiles));
+        const errorProfiles = (errorState.profiles || []).map(p =>
+          p.id === WWW3_PROFILE_ID ? { ...p, version: p.version.replace('(instalando...)', '(ERROR)'), _error: true } : p
+        );
+        await saveLauncherState(app.getPath('userData'), {
+          ...errorState,
+          profiles: errorProfiles,
+        });
+        console.log('[INSTALL-WWW3] [ERROR HANDLER] Perfil marcado como ERROR');
+      });
+    } catch (e) {
+      console.error('[INSTALL-WWW3] [ERROR HANDLER] Failed to mark profile as error:', e);
+    }
+
+    sendUpdateEvent('minecraft:install-error', {
+      installId,
+      type: 'www3',
+      version: '26.1.2',
+      message: errorMsg
+    });
+    return { error: 'Www3InstallFailed', message: errorMsg };
+  }
+});
+
 ipcMain.handle('minecraft:run', async (_, opts) => {
   const { profile, version } = opts || {};
+  const profileId = profile?.id;
+  if ((typeof profileId !== 'string' && typeof profileId !== 'number') || String(profileId).trim() === '') {
+    return { error: 'ProfileRequired', message: 'A saved profile ID is required to launch Minecraft.' };
+  }
   const mcVer = resolveMinecraftVersion(version);
   const baseDir = getMinecraftRoot();
+  const gameDir = getProfileGameDir(baseDir, profileId);
+  await fs.promises.mkdir(gameDir, { recursive: true });
   const versionDir = version?.path && String(version.path).trim()
     ? String(version.path).trim()
     : path.join(baseDir, 'versions', String(mcVer));
@@ -2241,7 +2673,7 @@ ipcMain.handle('minecraft:run', async (_, opts) => {
     '${auth_access_token}': normalizedSession.accessToken,
     '${auth_session}': normalizedSession.accessToken,
     '${version_name}': versionJson?.id || mcVer,
-    '${game_directory}': baseDir,
+    '${game_directory}': gameDir,
     '${assets_root}': path.join(baseDir, 'assets'),
     '${assets_index_name}': versionJson?.assets || '',
     '${user_type}': normalizedSession.userType,
@@ -2281,7 +2713,7 @@ ipcMain.handle('minecraft:run', async (_, opts) => {
   // These MUST be added for both vanilla and modded versions
   gameArgs.push('--username', normalizedSession.name);
   gameArgs.push('--version', versionJson?.id || mcVer);
-  gameArgs.push('--gameDir', baseDir);
+  gameArgs.push('--gameDir', gameDir);
   gameArgs.push('--assetsDir', path.join(baseDir, 'assets'));
   gameArgs.push('--assetIndex', versionJson?.assets || 'legacy');
   gameArgs.push('--uuid', normalizedSession.uuid);
@@ -2354,9 +2786,11 @@ ipcMain.handle('minecraft:run', async (_, opts) => {
 
   const assetsDir = path.join(baseDir, 'assets');
   const assetsIndexName = String(versionJson?.assets || versionJson?.assetIndex?.id || 'legacy');
-  if (!gameArgs.includes('--gameDir')) gameArgs.push('--gameDir', baseDir);
-  if (!gameArgs.includes('--assetsDir')) gameArgs.push('--assetsDir', assetsDir);
-  if (!gameArgs.includes('--assetIndex')) gameArgs.push('--assetIndex', assetsIndexName);
+  gameArgs = applySharedAndProfileGameDirectories(gameArgs, {
+    gameDir,
+    assetsDir,
+    assetIndex: assetsIndexName,
+  });
 
   // Move Fabric loader jar to front of classpath
   if (String(mainClass).includes('net.fabricmc.loader.impl.launch.knot.KnotClient')) {
@@ -2391,22 +2825,38 @@ ipcMain.handle('minecraft:run', async (_, opts) => {
      '--add-opens', 'java.base/java.util.concurrent=ALL-UNNAMED',
    ];
 
+   // Process version-specific JVM arguments (from version.json arguments.jvm)
+   // Includes substitutions like ${library_directory}, ${version_name}, etc.
+   if (Array.isArray(versionJson?.arguments?.jvm)) {
+     for (const arg of versionJson.arguments.jvm) {
+       if (typeof arg === 'string') {
+         let s = arg;
+         for (const [k, v] of Object.entries(substitutions)) s = s.replaceAll(k, v);
+         // Special substitution for ${library_directory} (NeoForge/Forge requirement)
+         s = s.replaceAll('${library_directory}', path.join(baseDir, 'libraries'));
+         appendJvmArgument(jvmArgs, s);
+       } else if (arg && typeof arg === 'object') {
+         if (!rulesPass(arg.rules)) continue;
+         const val = arg.value;
+         if (Array.isArray(val)) {
+           for (let part of val) {
+             for (const [k, v] of Object.entries(substitutions)) part = part.replaceAll(k, v);
+             part = part.replaceAll('${library_directory}', path.join(baseDir, 'libraries'));
+             appendJvmArgument(jvmArgs, part);
+           }
+         } else if (typeof val === 'string') {
+           let s = val;
+           for (const [k, v] of Object.entries(substitutions)) s = s.replaceAll(k, v);
+           s = s.replaceAll('${library_directory}', path.join(baseDir, 'libraries'));
+           appendJvmArgument(jvmArgs, s);
+         }
+       }
+     }
+   }
+
    // Additional JVM arguments from profile
-   if (profile?.jvmArguments) {
-     const args = String(profile.jvmArguments)
-       .trim()
-       .split(/\s+/)
-       .filter(arg => arg.length > 0);
-     jvmArgs.push(...args);
-   }
-   // Also check launch options (in case passed directly)
-   if (opts?.jvmArguments) {
-     const args = String(opts.jvmArguments)
-       .trim()
-       .split(/\s+/)
-       .filter(arg => arg.length > 0);
-     jvmArgs.push(...args);
-   }
+   appendJvmArguments(jvmArgs, profile?.jvmArguments);
+   appendJvmArguments(jvmArgs, opts?.jvmArguments);
 
   let configuredJavaPath = '';
   let javaPathSource = '';
@@ -2657,9 +3107,24 @@ ipcMain.handle('minecraft:run', async (_, opts) => {
   }
 
    const args = [...jvmArgs, '-cp', classpath, mainClass, ...gameArgs];
+   // DEBUG: Log all JVM args to troubleshoot --add-opens issues
+   try {
+     mainWindow?.webContents.send('minecraft:run-log', {
+       type: 'info',
+       msg: '[DEBUG] JVM args count: ' + jvmArgs.length
+     });
+     jvmArgs.forEach((a, i) => {
+       if (a.includes('add-opens') || a.includes('add-exports') || a.includes('java.base')) {
+         mainWindow?.webContents.send('minecraft:run-log', {
+           type: 'info',
+           msg: '[DEBUG] jvmArgs[' + i + ']: ' + a
+         });
+       }
+     });
+   } catch (e) {}
    let child;
    try {
-     child = spawn(finalJavaCmd, args, { cwd: baseDir });
+     child = spawn(finalJavaCmd, args, { cwd: gameDir });
    } catch (e) {
      try {
        mainWindow?.webContents.send('minecraft:run-log', {
@@ -2736,10 +3201,12 @@ ipcMain.handle('app:get-language', async () => {
 
 ipcMain.handle('app:set-language', async (_, language) => {
   try {
-    const currentState = await loadLauncherState(app.getPath('userData'));
-    await saveLauncherState(app.getPath('userData'), {
-      ...currentState,
-      settings: { ...currentState.settings, language: typeof language === 'string' && language.trim() ? language.trim() : 'es' },
+    await withStateLock(async () => {
+      const currentState = await loadLauncherState(app.getPath('userData'));
+      await saveLauncherState(app.getPath('userData'), {
+        ...currentState,
+        settings: { ...currentState.settings, language: typeof language === 'string' && language.trim() ? language.trim() : 'es' },
+      });
     });
     return { ok: true };
   } catch (error) { return { error: 'SaveFailed', message: error?.message || String(error) }; }

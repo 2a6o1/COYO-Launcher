@@ -72,6 +72,44 @@ export async function loadLauncherState(storageDir) {
   };
 }
 
+export function mergeLauncherState(currentState, partialState = {}, deletedProfileIds = new Set()) {
+  const mergedState = { ...currentState };
+  const deletedIds = Array.isArray(partialState?._deletedProfileIds)
+    ? partialState._deletedProfileIds
+    : [];
+  const restoredIds = Array.isArray(partialState?._restoredProfileIds)
+    ? partialState._restoredProfileIds
+    : [];
+  for (const id of restoredIds) deletedProfileIds.delete(id);
+  for (const id of deletedIds) deletedProfileIds.add(id);
+
+  for (const [key, value] of Object.entries(partialState || {})) {
+    if (value === undefined) continue;
+
+    if (key === 'profiles' && Array.isArray(value) && Array.isArray(currentState.profiles)) {
+      const mergedProfiles = [...currentState.profiles];
+      for (const incoming of value) {
+        if (!incoming || !incoming.id) continue;
+        const idx = mergedProfiles.findIndex(profile => profile.id === incoming.id);
+        if (idx >= 0) mergedProfiles[idx] = incoming;
+        else mergedProfiles.push(incoming);
+      }
+      mergedState.profiles = mergedProfiles;
+    } else {
+      mergedState[key] = value;
+    }
+  }
+
+  if (deletedProfileIds.size > 0) {
+    mergedState.profiles = (mergedState.profiles || []).filter(
+      profile => !deletedProfileIds.has(profile.id),
+    );
+  }
+  delete mergedState._deletedProfileIds;
+  delete mergedState._restoredProfileIds;
+  return mergedState;
+}
+
 export async function saveLauncherState(storageDir, state) {
   const normalizedState = {
     profiles: Array.isArray(state?.profiles) ? state.profiles : [],

@@ -27,6 +27,7 @@ The new Electron-based version represents a complete rewrite with improved perfo
 - **Modern Interface**: Built with React and Electron for a modern and customizable look.
 - **Minecraft Compatibility**: Manages Minecraft versions using custom implementation.
 - **Meteor Client 26.2**: One-click install for Meteor Client with Fabric 0.19.5 on Minecraft 26.2.
+- **Isolated profile game directories**: Each profile keeps its own `mods/`, `config/`, saves, and options while sharing downloaded Minecraft versions, libraries, and assets.
 - **Open Source**: Easily extendable and modifiable by the community.
 - **Multiplatform**: Available for Windows and Linux operating systems.
 - **Multilanguage Support**: Supports multiple languages for a better user experience.
@@ -130,7 +131,7 @@ COYO Launcher incluye soporte integrado para **Meteor Client 26.2** con Fabric 0
 
 1. Abre el launcher y asegúrate de tener un perfil con un nombre de jugador.
 2. En la sección de acciones rápidas, haz clic en **"Instalar Fabric + Meteor"**.
-3. El launcher instalará Fabric 0.19.5 sobre Minecraft 26.2, copiará el cliente Meteor a la carpeta `mods/` y creará un perfil dedicado.
+3. El launcher instalará Fabric 0.19.5 sobre Minecraft 26.2, copiará el cliente Meteor a la carpeta `mods/` aislada de ese perfil y creará un perfil dedicado.
 4. Una vez completado, selecciona el perfil **"Meteor Client"** y juega.
 
 > **Nota**: También puedes instalar Fabric por separado usando el botón **"Instalar Fabric"**, y luego agregar Meteor manualmente desde la pantalla de mods.
@@ -149,7 +150,7 @@ To install a vanilla Minecraft version, use the install section where you select
 
 For modded Minecraft, use the action buttons:
 - **Instalar Fabric** — installs Fabric Loader on the selected Minecraft version.
-- **Instalar Fabric + Meteor** — installs Fabric 0.19.5 on MC 26.2 and adds Meteor Client to `mods/` automatically.
+- **Instalar Fabric + Meteor** — installs Fabric 0.19.5 on MC 26.2 and adds Meteor Client to the selected profile's isolated `mods/` directory.
 - **Instalar Forge** — installs Forge on the selected Minecraft version.
 
 <img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/b7d06554-4d3c-494f-8440-3bed928fe2f6.svg" />
@@ -207,7 +208,11 @@ Troubleshooting:
 
 ## Mod Manager
 
-You can install, activate and deactivate mods with the mod manager:
+You can install, activate and deactivate mods with the mod manager. Mod files and game data (`config/`, saves, and options) are isolated per profile, so switching profiles does not mix their data. Large shared downloads such as Minecraft versions, libraries, and assets remain in the common Minecraft directory. Existing files in the old shared `mods/` directory are left untouched and are not automatically moved into a profile.
+
+Each profile's game directory is managed by the launcher under `<Minecraft directory>/profiles/<profile-id-hash>/game`; use the launcher rather than moving or renaming these folders manually.
+
+
 
 <img width="1102" height="661" alt="image" src="https://github.com/user-attachments/assets/854f777a-2038-430c-b683-7d91c6c427a9" />
 

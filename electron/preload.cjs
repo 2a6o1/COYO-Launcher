@@ -16,20 +16,23 @@ contextBridge.exposeInMainWorld('launcher', {
   minecraftGetInstalledVersions() {
     return ipcRenderer.invoke('minecraft:get-installed-versions');
   },
-  minecraftGetInstalledMods() {
-    return ipcRenderer.invoke('minecraft:get-installed-mods');
+  minecraftGetInstalledMods(profileId) {
+    return ipcRenderer.invoke('minecraft:get-installed-mods', { profileId });
   },
   minecraftGetNews() {
     return ipcRenderer.invoke('minecraft:get-news');
   },
-  minecraftToggleMod(modId, enable) {
-    return ipcRenderer.invoke('minecraft:toggle-mod', { modId, enable });
+  minecraftToggleMod(profileId, modId, enable) {
+    return ipcRenderer.invoke('minecraft:toggle-mod', { profileId, modId, enable });
   },
-  minecraftDeleteMod(modId) {
-    return ipcRenderer.invoke('minecraft:delete-mod', { modId });
+  minecraftSetAllModsEnabled(profileId, enable) {
+    return ipcRenderer.invoke('minecraft:set-all-mods-enabled', { profileId, enable });
   },
-  minecraftInstallModFile(sourcePath) {
-    return ipcRenderer.invoke('minecraft:install-mod-file', { sourcePath });
+  minecraftDeleteMod(profileId, modId) {
+    return ipcRenderer.invoke('minecraft:delete-mod', { profileId, modId });
+  },
+  minecraftInstallModFile(profileId, sourcePath) {
+    return ipcRenderer.invoke('minecraft:install-mod-file', { profileId, sourcePath });
   },
   minecraftPickModFiles() {
     return ipcRenderer.invoke('minecraft:pick-mod-files');
@@ -102,5 +105,8 @@ contextBridge.exposeInMainWorld('launcher', {
   },
   minecraftInstallMeteor(options) {
     return ipcRenderer.invoke('minecraft:install-meteor', options);
+  },
+  minecraftInstallWww3(options) {
+    return ipcRenderer.invoke('minecraft:install-www3', options);
   },
 });

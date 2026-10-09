@@ -18,6 +18,7 @@ export default function CentralCard({
   installProgress = 0,
   javaInstalling = false,
   javaInstallProgress = 0,
+  onWww3Start,
 }) {
   const [dropdownValue, setDropdownValue] = useState("");
   const [installSelectedVersion, setInstallSelectedVersion] = useState("");
@@ -211,6 +212,25 @@ export default function CentralCard({
           onClick={() => applyPreset("Herobrine", "1.20.4")}
         >
           Herobrine + 1.20.4
+        </button>
+      </div>
+
+      {/* WWW3 Servidor Section */}
+      <div className="beginner-www3-section">
+        <div className="beginner-www3-header">
+          <span className="www3-icon">🌐</span>
+          <h3>WWW3 Servidor</h3>
+        </div>
+        <p className="beginner-www3-desc">
+          Instala Minecraft 26.1.2 con NeoForge + modpack automático
+        </p>
+        <button
+          className="beginner-www3-btn"
+          type="button"
+          onClick={onWww3Start}
+          disabled={!localName?.trim() || isInstalling || javaInstalling}
+        >
+          {localName?.trim() ? "Comenzar" : "Escribe tu nombre primero"}
         </button>
       </div>
 

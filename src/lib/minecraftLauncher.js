@@ -229,7 +229,7 @@ function buildInstallTargets(versions) {
       versions: uniqueBy(sortVersionEntriesDescending(minecraftVersions).map(version => version.mcVer), value => value),
     },
     fabric: {
-      title: 'Install Fabric hh',
+      title: 'Install Fabric',
       versions: sortVersionsDescending(uniqueBy(fabricVersions.map(version => version.mcVer).filter(Boolean), value => value)),
       gameVersions: sortVersionsDescending(uniqueBy(fabricVersions.map(version => version.mcVer).filter(Boolean), value => value)),
       loadersByGameVersion: {},
@@ -361,6 +361,14 @@ export async function install({ type, version, profileKey, gameVersion, loaderVe
   }
 
   throw new Error('Installer not available: must run inside Electron with launcher.minecraftInstall exposed.');
+}
+
+export async function installWww3({ localName, javaPath } = {}) {
+  if (typeof window !== 'undefined' && window.launcher && typeof window.launcher.minecraftInstallWww3 === 'function') {
+    return await window.launcher.minecraftInstallWww3({ localName, javaPath });
+  }
+
+  throw new Error('WWW3 installer not available: must run inside Electron with launcher.minecraftInstallWww3 exposed.');
 }
 
 export async function run(options = {}) {

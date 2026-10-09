@@ -8,6 +8,7 @@ import {
   getVersionById,
   install,
   run,
+  installWww3,
 } from "./lib/minecraftLauncher";
 import { useI18n } from "./context/I18nContext";
 import logoIcon from "/icon.webp";
@@ -51,13 +52,17 @@ const launcher = window?.launcher ?? {
   minecraftOpenRootDirectory: () => Promise.resolve({ skipped: true }),
   minecraftGetInstalledVersions: () => Promise.resolve([]),
   minecraftGetInstalledMods: () => Promise.resolve([]),
+  minecraftToggleMod: () => Promise.resolve({ error: 'Not available' }),
+  minecraftDeleteMod: () => Promise.resolve({ error: 'Not available' }),
+  minecraftInstallModFile: () => Promise.resolve({ error: 'Not available' }),
   minecraftGetNews: () =>
     Promise.resolve({
       items: [],
       sourceUrl: "https://www.minecraft.net/en-us/articles",
     }),
-  minecraftSetAllModsEnabled: () => Promise.resolve({ ok: true }),
+  minecraftSetAllModsEnabled: () => Promise.resolve({ error: 'Not available' }),
   minecraftGetAuthState: () => Promise.resolve(null),
+  minecraftSaveState: () => Promise.resolve({}),
   minecraftLogin: () => Promise.resolve(null),
   minecraftLogout: () => Promise.resolve(null),
   minecraftCheckUpdate: () => Promise.resolve({ skipped: true }),
@@ -1105,6 +1110,8 @@ export default function App() {
   const [installedVersions, setInstalledVersions] = useState([]);
   const [installTargets, setInstallTargets] = useState(INSTALL_TARGETS);
   const [mods, setMods] = useState([]);
+  const [modsProfileKey, setModsProfileKey] = useState(null);
+  const [modsLoadingProfileKey, setModsLoadingProfileKey] = useState(null);
   const [logs, setLogs] = useState([]);
   const [newsItems, setNewsItems] = useState([]);
   const [newsSourceUrl, setNewsSourceUrl] = useState(
@@ -1142,6 +1149,13 @@ export default function App() {
   const [showTutorial, setShowTutorial] = useState(true);
   const [javaInstalling, setJavaInstalling] = useState(false);
   const [javaInstallProgress, setJavaInstallProgress] = useState(0);
+  const pendingWww3AutoLaunchRef = useRef(null);
+  const www3InstallIdRef = useRef(null);
+  const completedWww3InstallIdRef = useRef(null);
+  const accountHydratedProfileRef = useRef(null);
+  const deletedProfileIdsRef = useRef(new Set());
+  const saveRestoredProfileRef = useRef(null);
+  const modLoadRequestRef = useRef(0);
   const [settings, setSettings] = useState({
     keepOpen: false,
     showConsole: true,
@@ -1172,6 +1186,9 @@ export default function App() {
 
   const activeProfile =
     profiles.find((p) => p.id === activeProfileId) || profiles[0];
+  const activeProfileKey = activeProfile?.id == null ? null : String(activeProfile.id);
+  const activeProfileIdRef = useRef(activeProfileKey);
+  activeProfileIdRef.current = activeProfileKey;
   const profileToEdit =
     profileEditor?.profileId != null
       ? profiles.find((p) => p.id === profileEditor.profileId) || null
@@ -1271,10 +1288,30 @@ export default function App() {
       "minecraft:install-progress",
       (p) => {
         if (!p) return;
+        if (
+          p.installId &&
+          p.profileId &&
+          completedWww3InstallIdRef.current !== p.installId
+        ) {
+          www3InstallIdRef.current = p.installId;
+          completedWww3InstallIdRef.current = null;
+        }
+        if (p.restoredProfileId) {
+          saveRestoredProfileRef.current?.(p.restoredProfileId);
+        }
         if (p.installId) setInstallId(p.installId);
         if (p && typeof p.percent === "number") setProgress(p.percent);
-        if (p && p.percent == null && typeof p.loaded === "number")
+        if (p.message) addLog("info", p.message);
+        else if (p && p.percent == null && typeof p.loaded === "number")
           addLog("info", `Installing: ${p.loaded}/${p.total || "unknown"}`);
+        // Refresh profiles as soon as the pending WWW3 profile is persisted.
+        if (p.message && p.message.includes('Perfil creado')) {
+          launcher.minecraftGetState?.().then((state) => {
+            if (state?.profiles && Array.isArray(state.profiles)) {
+              setProfiles(state.profiles);
+            }
+          });
+        }
       },
     );
     const installFileOff = launcher.on?.(
@@ -1287,15 +1324,46 @@ export default function App() {
     );
     const installCompleteOff = launcher.on?.(
       "minecraft:install-complete",
-      (r) => {
+      async (r) => {
+        const isWww3 = r?.type === "www3" && r.profileId;
+        if (isWww3) {
+          const installId = r.installId || www3InstallIdRef.current;
+          if (www3InstallIdRef.current && installId !== www3InstallIdRef.current) return;
+          if (installId && completedWww3InstallIdRef.current === installId) return;
+          completedWww3InstallIdRef.current = installId;
+          www3InstallIdRef.current = null;
+          setBeginnerMode(false);
+        }
         addLog("success", `Installed ${r.type} ${r.version} -> ${r.path}`);
         setInstallId(null);
-        launcher
-          .minecraftGetInstalledVersions?.()
-          .then((versions) => {
-            if (Array.isArray(versions)) setInstalledVersions(versions);
-          })
-          .catch(() => {});
+        setProgress(100);
+        setBeginnerIsInstalling(false);
+
+        const [state, versions] = await Promise.all([
+          launcher.minecraftGetState?.().catch(() => null),
+          launcher.minecraftGetInstalledVersions?.().catch(() => null),
+        ]);
+        if (state?.profiles && Array.isArray(state.profiles)) {
+          setProfiles(state.profiles);
+          const www3Profile = isWww3
+            ? state.profiles.find(profile => profile.id === r.profileId)
+            : null;
+          if (www3Profile) {
+            pendingWww3AutoLaunchRef.current = r.profileId;
+            setActiveProfileId(r.profileId);
+          } else if (isWww3) {
+            pendingWww3AutoLaunchRef.current = null;
+          }
+        } else if (isWww3) {
+          pendingWww3AutoLaunchRef.current = null;
+        }
+        if (Array.isArray(versions)) setInstalledVersions(versions);
+        if (isWww3 && !Array.isArray(versions)) {
+          launcher.minecraftGetInstalledVersions?.().then((nextVersions) => {
+            if (Array.isArray(nextVersions)) setInstalledVersions(nextVersions);
+          }).catch(() => {});
+        }
+
         pushToast({
           tone: "success",
           title: t(`install.${r.type}`),
@@ -1307,7 +1375,11 @@ export default function App() {
       },
     );
     const installErrorOff = launcher.on?.("minecraft:install-error", (e) => {
+      if (e?.type === "www3" && www3InstallIdRef.current && e.installId !== www3InstallIdRef.current) return;
+      if (e?.type === "www3") www3InstallIdRef.current = null;
+      if (e?.type === "www3") completedWww3InstallIdRef.current = null;
       addLog("error", `Install error: ${e?.message}`);
+      if (e?.type === "www3") pendingWww3AutoLaunchRef.current = null;
       setProgress(0);
       setInstallId(null);
       setBeginnerIsInstalling(false);
@@ -1315,6 +1387,16 @@ export default function App() {
     const installCancelledOff = launcher.on?.(
       "minecraft:install-cancelled",
       (e) => {
+        if (
+          e?.installId &&
+          www3InstallIdRef.current &&
+          e.installId !== www3InstallIdRef.current
+        ) return;
+        if (!e?.installId || e.installId === www3InstallIdRef.current) {
+          www3InstallIdRef.current = null;
+          completedWww3InstallIdRef.current = null;
+          pendingWww3AutoLaunchRef.current = null;
+        }
         addLog("warn", `Install cancelled: ${e?.installId}`);
         setInstallId(null);
         setProgress(0);
@@ -1566,38 +1648,19 @@ export default function App() {
       if (hasInstallTargets) {
         setInstallTargets(state.installTargets);
       }
-      const savedMods = Array.isArray(state.mods) ? state.mods : [];
       launcher
         .minecraftGetInstalledVersions?.()
         .then((versions) => {
           if (Array.isArray(versions)) setInstalledVersions(versions);
         })
         .catch(() => {});
-      launcher
-        .minecraftGetInstalledMods?.()
-        .then((mods) => {
-          if (!Array.isArray(mods)) {
-            setMods(savedMods);
-            return;
-          }
-
-          const savedById = new Map(savedMods.map((mod) => [mod.id, mod]));
-          const mergedMods = mods.map((mod) => ({
-            ...mod,
-            ...(savedById.get(mod.id) || {}),
-          }));
-          setMods(mergedMods.length > 0 ? mergedMods : savedMods);
-        })
-        .catch(() => {
-          setMods(savedMods);
-        });
+      setMods([]);
       setActiveProfileId((prev) => prev ?? nextProfiles?.[0]?.id ?? null);
       setStateHydrated(true);
       if (incomingProfiles.length === 0) {
         setBeginnerMode(true);
         persistState({
           profiles: nextProfiles,
-          mods: savedMods,
           logs: [],
           versions:
             state.versions && Array.isArray(state.versions)
@@ -1648,7 +1711,6 @@ export default function App() {
       } else {
         clearConsole({
           profiles: nextProfiles,
-          mods: Array.isArray(state.mods) ? state.mods : [],
           versions:
             state.versions && Array.isArray(state.versions)
               ? state.versions
@@ -1713,19 +1775,36 @@ export default function App() {
       };
     }
     const profileKey = String(activeProfileId ?? "default");
+    accountHydratedProfileRef.current = null;
     const localName = String(
       activeProfile?.localName || activeProfile?.name || "",
     ).trim();
 
+    if (pendingWww3AutoLaunchRef.current !== profileKey) {
+      setAccount({
+        name: "",
+        loggedIn: false,
+        profileKey,
+        kind: "none",
+        session: null,
+      });
+    } else if (activeProfile) {
+      setAccount({
+        name: localName,
+        loggedIn: Boolean(localName),
+        profileKey,
+        kind: localName ? "local" : "none",
+        session: localName ? createOfflineSession(localName) : null,
+      });
+    }
+
     const hydrateAccount = async () => {
       setAuthRefreshing(true);
-      const authState = await launcher.minecraftGetAuthState(profileKey);
-      if (cancelled || !authState) {
-        setAuthRefreshing(false);
-        return;
-      }
-
-      if (authState.loggedIn && authState.name) {
+      const authState = await launcher
+        .minecraftGetAuthState(profileKey)
+        .catch(() => null);
+      if (cancelled) return;
+      if (authState?.loggedIn && authState.name) {
         setAccount({
           name: authState.name,
           loggedIn: true,
@@ -1736,6 +1815,7 @@ export default function App() {
             userType: authState.userType || "msa",
           },
         });
+        accountHydratedProfileRef.current = profileKey;
         setAuthRefreshing(false);
         return;
       }
@@ -1748,6 +1828,7 @@ export default function App() {
           kind: "local",
           session: createOfflineSession(localName),
         });
+        accountHydratedProfileRef.current = profileKey;
         setAuthRefreshing(false);
         return;
       }
@@ -1759,6 +1840,7 @@ export default function App() {
         kind: "none",
         session: null,
       });
+      accountHydratedProfileRef.current = profileKey;
       setAuthRefreshing(false);
     };
 
@@ -1783,6 +1865,9 @@ export default function App() {
       launcher
         .minecraftSaveState({
           ...nextState,
+          ...(deletedProfileIdsRef.current.size > 0
+            ? { _deletedProfileIds: [...deletedProfileIdsRef.current] }
+            : {}),
           settings: nextSettings,
         })
         .catch(() => {});
@@ -1790,20 +1875,24 @@ export default function App() {
     [language],
   );
 
+  saveRestoredProfileRef.current = (profileId) => {
+    if (!deletedProfileIdsRef.current.delete(profileId)) return;
+    launcher
+      .minecraftSaveState({ _restoredProfileIds: [profileId] })
+      .catch(() => {});
+  };
+
   const clearConsole = useCallback(
     (nextState = {}) => {
       setLogs([]);
-      const currentState = stateRef.current;
+      // Solo persistir logs y settings, NO profiles/mods/versions (evita race condition con main process)
+      // El main process es la fuente de verdad para profiles/mods/versions
       persistState({
-        profiles: nextState.profiles ?? currentState.profiles,
-        mods: nextState.mods ?? currentState.mods,
         logs: [],
-        versions: nextState.versions ?? versionCatalog,
-        installTargets: nextState.installTargets ?? installTargets,
-        settings: nextState.settings ?? currentState.settings,
+        settings: nextState.settings ?? stateRef.current.settings,
       });
     },
-    [installTargets, persistState, versionCatalog],
+    [persistState],
   );
 
   useEffect(
@@ -1822,19 +1911,15 @@ export default function App() {
       const time = formatClock();
       setLogs((prev) => {
         const nextLogs = [...prev, { time, level, msg }];
-        const currentState = stateRef.current;
+        // Solo persistir logs y settings, NO profiles/mods/versions (evita race condition con main process)
         persistState({
-          profiles: currentState.profiles,
-          mods: currentState.mods,
           logs: nextLogs,
-          versions: versionCatalog,
-          installTargets,
-          settings: currentState.settings,
+          settings: stateRef.current.settings,
         });
         return nextLogs;
       });
     },
-    [installTargets, persistState, versionCatalog],
+    [persistState],
   );
 
   const handlePlay = async () => {
@@ -1888,7 +1973,7 @@ export default function App() {
         userType: account.kind === "local" ? "legacy" : "msa",
       };
       const result = await run({
-        profile: activeProfile,
+        profile: { ...activeProfile, id: activeProfile.id },
         version: activeVersion,
         profileKey: String(activeProfileId ?? "default"),
         javaPath: activeProfile?.javaPath || settings.javaPath,
@@ -1911,6 +1996,28 @@ export default function App() {
     }
   };
   handlePlayRef.current = handlePlay;
+
+  useEffect(() => {
+    const pendingProfileId = pendingWww3AutoLaunchRef.current;
+    if (
+      !pendingProfileId ||
+      activeProfileId !== pendingProfileId ||
+      !activeProfile ||
+      activeProfile.id !== pendingProfileId ||
+      accountHydratedProfileRef.current !== String(pendingProfileId) ||
+      !account.loggedIn ||
+      !account.name ||
+      authRefreshing ||
+      gameState !== "idle" ||
+      !activeInstalledVersion
+    ) {
+      return;
+    }
+
+    pendingWww3AutoLaunchRef.current = null;
+    addLog("info", "🚀 Iniciando WWW3 Servidor automáticamente...");
+    handlePlayRef.current?.();
+  }, [activeProfileId, account, activeInstalledVersion, authRefreshing, addLog, gameState]);
 
   const handleInstall = async (type, selection) => {
     const usesGameAndLoader = type === "fabric" || type === "forge";
@@ -2071,6 +2178,50 @@ export default function App() {
     }
   };
 
+  // ── WWW3 Servidor Install (NeoForge + Modpack) ───────
+  const handleWww3Start = useCallback(async () => {
+    const name = beginnerLocalName.trim();
+    if (!name) {
+      addLog("error", "Escribe tu nombre antes de comenzar.");
+      return;
+    }
+
+    if (beginnerIsInstalling || javaInstalling) return;
+
+    setBeginnerIsInstalling(true);
+    setProgress(0);
+    setInstallId(null);
+    setActiveTab("console");
+    clearConsole();
+    addLog("info", "🚀 Iniciando instalación WWW3 Servidor (MC 26.1.2 + NeoForge + Modpack)...");
+
+    try {
+      const javaDetection = await launcher.minecraftDetectJava?.();
+      const javaPath = javaDetection?.path || settings.javaPath || '';
+      const result = await installWww3({
+        localName: name,
+        javaPath,
+      });
+
+      if (!result) {
+        throw new Error("El instalador no respondió.");
+      }
+
+      if (result?.error) {
+        throw new Error(result.message || "Error de instalación WWW3.");
+      }
+    } catch (err) {
+      addLog("error", `Falló la instalación de WWW3: ${err?.message || err}`);
+      pushToast({
+        tone: "error",
+        title: "WWW3 Servidor",
+        message: err?.message || "Error de instalación.",
+      });
+    } finally {
+      setBeginnerIsInstalling(false);
+    }
+  }, [beginnerLocalName, beginnerIsInstalling, javaInstalling, addLog, pushToast, settings.javaPath, setBeginnerIsInstalling, setProgress, setInstallId, setActiveTab, clearConsole, setActiveProfileId]);
+
   const handleCancelInstall = async () => {
     if (!installId) return;
     try {
@@ -2096,18 +2247,14 @@ export default function App() {
   const handleSettingChange = (key, val) => {
     setSettings((prev) => {
       const nextSettings = { ...prev, [key]: val };
-      const currentState = stateRef.current;
+      // Solo persistir settings y logs, NO profiles/mods/versions desde stateRef (evita race condition)
       persistState({
-        profiles: currentState.profiles,
-        mods: currentState.mods,
-        logs: currentState.logs,
-        versions: versionCatalog,
-        installTargets,
+        logs: stateRef.current.logs,
         settings: {
-          ...currentState.settings,
+          ...stateRef.current.settings,
           [key]: val,
           javaPath: nextSettings.javaPath,
-          language: currentState.settings.language ?? language,
+          language: stateRef.current.settings.language ?? language,
         },
       });
       if (key === "showSnapshots") {
@@ -2169,7 +2316,6 @@ export default function App() {
       const currentState = stateRef.current;
       persistState({
         profiles: nextProfiles,
-        mods: currentState.mods,
         logs: currentState.logs,
         versions: versionCatalog,
         installTargets,
@@ -2196,39 +2342,36 @@ export default function App() {
         throw new Error(result.message || result.error);
       }
 
-      setProfiles((prev) => {
-        const nextProfiles = prev.filter((profile) => profile.id !== profileId);
-        const nextActiveId =
-          activeProfileId === profileId
-            ? (nextProfiles[0]?.id ?? null)
-            : activeProfileId;
+      deletedProfileIdsRef.current.add(profileId);
+      const nextProfiles = profiles.filter((profile) => profile.id !== profileId);
+      const nextActiveId =
+        activeProfileId === profileId
+          ? (nextProfiles[0]?.id ?? null)
+          : activeProfileId;
 
-        setActiveProfileId(nextActiveId);
-        if (profileEditor?.profileId === profileId) {
-          setProfileEditor(null);
-        }
+      setProfiles(nextProfiles);
+      setActiveProfileId(nextActiveId);
+      if (profileEditor?.profileId === profileId) {
+        setProfileEditor(null);
+      }
 
-        if (activeProfileId === profileId) {
-          setAccount({
-            name: "",
-            loggedIn: false,
-            profileKey: String(nextActiveId ?? "default"),
-            kind: "none",
-            session: null,
-          });
-        }
-
-        const currentState = stateRef.current;
-        persistState({
-          profiles: nextProfiles,
-          mods: currentState.mods,
-          logs: currentState.logs,
-          versions: versionCatalog,
-          installTargets,
-          settings: currentState.settings,
+      if (activeProfileId === profileId) {
+        setAccount({
+          name: "",
+          loggedIn: false,
+          profileKey: String(nextActiveId ?? "default"),
+          kind: "none",
+          session: null,
         });
+      }
 
-        return nextProfiles;
+      const currentState = stateRef.current;
+      persistState({
+        profiles: nextProfiles,
+        logs: currentState.logs,
+        versions: versionCatalog,
+        installTargets,
+        settings: currentState.settings,
       });
 
       addLog("info", `Deleted profile "${target.name}".`);
@@ -2255,7 +2398,6 @@ export default function App() {
       const currentState = stateRef.current;
       persistState({
         profiles: nextProfiles,
-        mods: currentState.mods,
         logs: currentState.logs,
         versions: versionCatalog,
         installTargets,
@@ -2270,178 +2412,128 @@ export default function App() {
     );
   };
 
+  const refreshInstalledMods = useCallback(async (profileId = activeProfileKey) => {
+    if (profileId != null && String(activeProfileIdRef.current) !== String(profileId)) return;
+    const requestId = ++modLoadRequestRef.current;
+    if (profileId == null) {
+      setMods([]);
+      setModsProfileKey(null);
+      setModsLoadingProfileKey(null);
+      return;
+    }
+    setMods([]);
+    setModsProfileKey(null);
+    setModsLoadingProfileKey(String(profileId));
+    try {
+      const installed = await launcher.minecraftGetInstalledMods(profileId);
+      if (requestId !== modLoadRequestRef.current || String(activeProfileIdRef.current) !== String(profileId)) return;
+      if (installed?.error) throw new Error(installed.message || installed.error);
+      setMods(Array.isArray(installed) ? installed : []);
+      setModsProfileKey(String(profileId));
+    } catch {
+      if (requestId === modLoadRequestRef.current && String(activeProfileIdRef.current) === String(profileId)) {
+        setMods([]);
+      }
+    } finally {
+      if (requestId === modLoadRequestRef.current) setModsLoadingProfileKey(null);
+    }
+  }, [activeProfileKey]);
+
+  useEffect(() => {
+    if (!stateHydrated) return;
+    void refreshInstalledMods(activeProfileKey);
+  }, [activeProfileKey, refreshInstalledMods, stateHydrated]);
+
   const handleModToggle = async (id) => {
-    const target = mods.find((mod) => mod.id === id);
-    if (!target) return;
+    const profileId = activeProfileKey;
+    const target = modsProfileKey === String(profileId) ? mods.find((mod) => mod.id === id) : null;
+    if (profileId == null || !target) return;
 
     const nextEnabled = !target.enabled;
-    setMods((prev) =>
-      prev.map((mod) =>
-        mod.id === id ? { ...mod, enabled: nextEnabled } : mod,
-      ),
-    );
-
+    setMods((prev) => prev.map((mod) => mod.id === id ? { ...mod, enabled: nextEnabled } : mod));
     try {
-      const result = await launcher.minecraftToggleMod(id, nextEnabled);
-      if (result?.error) {
-        throw new Error(result.message || result.error);
-      }
-
-      const updatedMods = await launcher.minecraftGetInstalledMods();
-      if (Array.isArray(updatedMods)) {
-        setMods(updatedMods);
-      }
-
-      const currentState = stateRef.current;
-      persistState({
-        profiles: currentState.profiles,
-        mods: Array.isArray(updatedMods) ? updatedMods : currentState.mods,
-        logs: currentState.logs,
-        versions: versionCatalog,
-        installTargets,
-        settings: currentState.settings,
-      });
+      const result = await launcher.minecraftToggleMod(profileId, id, nextEnabled);
+      if (result?.error) throw new Error(result.message || result.error);
+      await refreshInstalledMods(profileId);
     } catch (error) {
-      setMods((prev) =>
-        prev.map((mod) =>
-          mod.id === id ? { ...mod, enabled: target.enabled } : mod,
-        ),
-      );
+      if (String(activeProfileIdRef.current) === String(profileId)) {
+        setMods((prev) => prev.map((mod) => mod.id === id ? { ...mod, enabled: target.enabled } : mod));
+      }
       addLog("error", `Mod toggle failed: ${error?.message || error}`);
     }
   };
 
   const handleSetAllModsEnabled = async (enable) => {
-    if (!mods.length) return;
-
+    const profileId = activeProfileKey;
+    if (profileId == null || modsProfileKey !== String(profileId) || !mods.length) return;
     const previousMods = mods;
-    const targetMods = mods.filter(
-      (mod) => Boolean(mod.enabled) !== Boolean(enable),
-    );
+    const targetMods = mods.filter((mod) => Boolean(mod.enabled) !== Boolean(enable));
     if (!targetMods.length) return;
 
-    setMods((prev) =>
-      prev.map((mod) =>
-        Boolean(mod.enabled) !== Boolean(enable)
-          ? { ...mod, enabled: enable }
-          : mod,
-      ),
-    );
-
+    setMods((prev) => prev.map((mod) => Boolean(mod.enabled) !== Boolean(enable) ? { ...mod, enabled: enable } : mod));
     try {
-      for (const mod of targetMods) {
-        const result = await launcher.minecraftToggleMod(mod.id, enable);
-        if (result?.error) {
-          throw new Error(result.message || result.error);
-        }
-      }
-
-      const updatedMods = await launcher.minecraftGetInstalledMods();
-      if (Array.isArray(updatedMods)) {
-        setMods(updatedMods);
-      }
-
-      const currentState = stateRef.current;
-      persistState({
-        profiles: currentState.profiles,
-        mods: Array.isArray(updatedMods) ? updatedMods : currentState.mods,
-        logs: currentState.logs,
-        versions: versionCatalog,
-        installTargets,
-        settings: currentState.settings,
-      });
-
-      addLog(
-        "info",
-        enable ? t("messages.modsEnabledAll") : t("messages.modsDisabledAll"),
-      );
+      const result = await launcher.minecraftSetAllModsEnabled(profileId, enable);
+      if (result?.error) throw new Error(result.message || result.error);
+      await refreshInstalledMods(profileId);
+      addLog("info", enable ? t("messages.modsEnabledAll") : t("messages.modsDisabledAll"));
     } catch (error) {
-      setMods(previousMods);
+      if (String(activeProfileIdRef.current) === String(profileId)) setMods(previousMods);
       addLog("error", `Bulk mod toggle failed: ${error?.message || error}`);
     }
   };
 
   const handleModDelete = async (id) => {
-    const target = mods.find((mod) => mod.id === id);
-    if (!target) return;
-
+    const profileId = activeProfileKey;
+    const target = modsProfileKey === String(profileId) ? mods.find((mod) => mod.id === id) : null;
+    if (profileId == null || !target) return;
     try {
-      const result = await launcher.minecraftDeleteMod(id);
+      const result = await launcher.minecraftDeleteMod(profileId, id);
       if (result?.canceled) {
         addLog("info", `Delete cancelled for ${target.name}.`);
         return;
       }
-      if (result?.error) {
-        throw new Error(result.message || result.error);
-      }
-
+      if (result?.error) throw new Error(result.message || result.error);
       addLog("info", `Deleted mod ${target.name}.`);
-      const updatedMods = await launcher.minecraftGetInstalledMods();
-      if (Array.isArray(updatedMods)) {
-        setMods(updatedMods);
-      }
-
-      const currentState = stateRef.current;
-      persistState({
-        profiles: currentState.profiles,
-        mods: Array.isArray(updatedMods) ? updatedMods : currentState.mods,
-        logs: currentState.logs,
-        versions: versionCatalog,
-        installTargets,
-        settings: currentState.settings,
-      });
+      await refreshInstalledMods(profileId);
     } catch (error) {
       addLog("error", `Mod delete failed: ${error?.message || error}`);
     }
   };
 
-  const refreshInstalledMods = useCallback(async () => {
-    try {
-      const installed = await launcher.minecraftGetInstalledMods();
-      if (Array.isArray(installed)) {
-        setMods(installed);
-      }
-    } catch {
-      // Keep the current list if refresh fails.
+  const importModFiles = useCallback(async (files) => {
+    const profileId = activeProfileKey;
+    if (profileId == null) {
+      addLog("warn", "Select a profile before importing mods.");
+      return;
     }
-  }, []);
+    const acceptedFiles = Array.from(files || []).filter((file) =>
+      /\.(jar|olpkg)$/i.test(file?.path || file?.name || ""),
+    );
+    if (acceptedFiles.length === 0) {
+      addLog("warn", "Select only .jar or .olpkg files.");
+      return;
+    }
 
-  const importModFiles = useCallback(
-    async (files) => {
-      const acceptedFiles = Array.from(files || []).filter((file) =>
-        /\.(jar|olpkg)$/i.test(file?.path || file?.name || ""),
-      );
-      if (acceptedFiles.length === 0) {
-        addLog("warn", "Select only .jar or .olpkg files.");
-        return;
+    for (const file of acceptedFiles) {
+      const sourcePath = String(file?.path || "").trim();
+      if (!sourcePath) {
+        addLog("error", `No file path available for ${file?.name || "mod file"}.`);
+        continue;
       }
-
-      for (const file of acceptedFiles) {
-        const sourcePath = String(file?.path || "").trim();
-        if (!sourcePath) {
-          addLog(
-            "error",
-            `No file path available for ${file?.name || "mod file"}.`,
-          );
+      const result = await launcher.minecraftInstallModFile(profileId, sourcePath);
+      if (String(activeProfileIdRef.current) !== String(profileId)) return;
+      if (result?.error) {
+        if (result.canceled) {
+          addLog("info", `Skipped ${file.name || sourcePath}.`);
           continue;
         }
-
-        const result = await launcher.minecraftInstallModFile(sourcePath);
-        if (result?.error) {
-          if (result.canceled) {
-            addLog("info", `Skipped ${file.name || sourcePath}.`);
-            continue;
-          }
-          addLog("error", result.message || result.error);
-        } else {
-          addLog("info", `Imported mod ${file.name || result.path}`);
-        }
+        addLog("error", result.message || result.error);
+      } else {
+        addLog("info", `Imported mod ${file.name || result.path}`);
       }
-
-      await refreshInstalledMods();
-    },
-    [addLog, refreshInstalledMods],
-  );
+    }
+    await refreshInstalledMods(profileId);
+  }, [activeProfileKey, addLog, refreshInstalledMods]);
 
   const handleAddModClick = useCallback(() => {
     launcher
@@ -2767,7 +2859,6 @@ export default function App() {
       const currentState = stateRef.current;
       persistState({
         profiles: currentState.profiles,
-        mods: currentState.mods,
         logs: currentState.logs,
         versions: versionCatalog,
         installTargets,
@@ -2868,6 +2959,7 @@ export default function App() {
             appVersion={appVersion}
             profiles={profiles}
             onSelectProfile={handleBeginnerSelectAndPlay}
+            onWww3Start={handleWww3Start}
           />
           {showTutorial ? (
             <BeginnerTutorial
@@ -3558,7 +3650,7 @@ export default function App() {
                     className="action-btn"
                     style={{ fontSize: 11, padding: "5px 10px" }}
                     onClick={() => handleSetAllModsEnabled(true)}
-                    disabled={!mods.some((mod) => !mod.enabled)}
+                    disabled={modsProfileKey !== String(activeProfileKey) || modsLoadingProfileKey === String(activeProfileKey) || !mods.some((mod) => !mod.enabled)}
                   >
                     <Icon d={ICONS.download} size={11} />
                     {t("mods.enableAll")}
@@ -3567,7 +3659,7 @@ export default function App() {
                     className="action-btn"
                     style={{ fontSize: 11, padding: "5px 10px" }}
                     onClick={() => handleSetAllModsEnabled(false)}
-                    disabled={!mods.some((mod) => mod.enabled)}
+                    disabled={modsProfileKey !== String(activeProfileKey) || modsLoadingProfileKey === String(activeProfileKey) || !mods.some((mod) => mod.enabled)}
                   >
                     <Icon d={ICONS.stop} size={11} />
                     {t("mods.disableAll")}
@@ -3583,8 +3675,8 @@ export default function App() {
                 </div>
               </div>
               <div className="mod-grid">
-                {mods
-                  .filter((mod) =>
+                {modsProfileKey === String(activeProfileKey)
+                  ? mods.filter((mod) =>
                     String(mod.name || "")
                       .toLowerCase()
                       .includes(modSearch.toLowerCase()),
@@ -3596,7 +3688,8 @@ export default function App() {
                       onToggle={handleModToggle}
                       onDelete={handleModDelete}
                     />
-                  ))}
+                  ))
+                  : null}
               </div>
             </div>
 
@@ -3619,7 +3712,6 @@ export default function App() {
                       const currentState = stateRef.current;
                       persistState({
                         profiles: nextProfiles,
-                        mods: currentState.mods,
                         logs: currentState.logs,
                         versions: versionCatalog,
                         installTargets,

@@ -14,7 +14,8 @@
     "build": "vite build",
     "start": "electron .",
     "build:win:dir": "npm run build && electron-builder --win --dir",
-    "build:win:installer": "npm run build && electron-builder --win nsis"
+    "build:win:installer": "npm run build && electron-builder --win nsis",
+    "test": "node --test"
   },
   "dependencies": {
     "adm-zip": "^0.6.0",
@@ -56,6 +57,8 @@
       "dist/**/*",
       "electron/**/*",
       "src/lib/**/*",
+      "extsource/neoforge-26.1.2.114-installer.jar",
+      "extsource/automodpack-mc26.1.2-neoforge-4.0.6.jar",
       "package.json"
     ],
     "extraMetadata": {

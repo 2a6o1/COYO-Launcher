@@ -3993,3 +3993,70 @@ button svg {
     border-color: var(--border);
   }
 }
+
+/* ── WWW3 SERVIDOR SECTION ── */
+.beginner-www3-section {
+  margin-top: clamp(16px, 3vw, 20px);
+  padding: clamp(14px, 3vw, 18px);
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border: 1px solid #0f3460;
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.beginner-www3-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.beginner-www3-header h3 {
+  margin: 0;
+  color: #e8d5b7;
+  font-size: 1.1rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.www3-icon {
+  font-size: 1.3rem;
+}
+
+.beginner-www3-desc {
+  margin: 0 0 12px;
+  color: #a0a0b0;
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  line-height: 1.4;
+}
+
+.beginner-www3-btn {
+  width: 100%;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, #e8d5b7 0%, #d4c4a0 100%);
+  color: #1a1a2e;
+  border: none;
+  border-radius: var(--radius-md);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.beginner-www3-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(232, 213, 183, 0.3);
+}
+
+.beginner-www3-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background: #3a3a4a;
+  color: #6a6a7a;
+  transform: none;
+  box-shadow: none;
+}
